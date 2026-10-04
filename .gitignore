@@ -1,0 +1,11 @@
+.venv/
+bin/
+models/
+__pycache__/
+*.pyc
+tests/audio/
+tests/*.log
+tests/*.png
+*.log
+tests/bench_audio/
+tests/bench_out/
