@@ -52,7 +52,7 @@ DEFAULTS: dict[str, Any] = {
     "cleanup": {
         "enabled": True,
         "min_words": 4,              # skip the LLM for utterances shorter than this
-        "model_path": "models/Qwen3.5-4B-Q4_K_M.gguf",
+        "model_path": "models/Qwen3.5-4B-Q8_0.gguf",
         "server_exe": "bin/llama/llama-server.exe",
         "port": 8765,
         "gpu_layers": 99,

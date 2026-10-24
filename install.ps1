@@ -80,11 +80,11 @@ if (-not (Test-Path $llama)) {
 }
 
 # ---------------------------------------------------------------- models
-$gguf = Join-Path $root 'models\Qwen3.5-4B-Q4_K_M.gguf'
+$gguf = Join-Path $root 'models\Qwen3.5-4B-Q8_0.gguf'
 if (-not $SkipModel -and -not (Test-Path $gguf)) {
-    Step 'Downloading the cleanup model (Qwen3.5-4B Q4_K_M, about 2.7 GB)'
+    Step 'Downloading the cleanup model (Qwen3.5-4B Q8_0, about 4.3 GB)'
     New-Item -ItemType Directory -Force models | Out-Null
-    & .venv\Scripts\python.exe -c "from huggingface_hub import hf_hub_download as d; print(d('unsloth/Qwen3.5-4B-GGUF', 'Qwen3.5-4B-Q4_K_M.gguf', local_dir='models'))"
+    & .venv\Scripts\python.exe -c "from huggingface_hub import hf_hub_download as d; print(d('unsloth/Qwen3.5-4B-GGUF', 'Qwen3.5-4B-Q8_0.gguf', local_dir='models'))"
     Check-Exit 'Model download'
     if (-not (Test-Path $gguf)) { throw "Expected $gguf after the download but it is not there." }
 }

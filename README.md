@@ -26,11 +26,11 @@ Inspired by Wispr Flow. Not affiliated.
 ## Requirements
 
 - Windows 10 or 11, 64-bit.
-- An NVIDIA GPU with about 6 GB of VRAM or more is recommended (RTX 20-series or newer). The speech model and the
+- An NVIDIA GPU with about 8 GB of VRAM or more is recommended (RTX 20-series or newer). The speech model and the
   cleanup model both live on the GPU.
 - A recent NVIDIA driver. The bundled llama.cpp build targets CUDA 13.x, which wants driver 580 or newer.
 - [uv](https://docs.astral.sh/uv/) (it fetches Python 3.12 for you): `winget install --id=astral-sh.uv -e`
-- About 8 GB of free disk: roughly 3 GB for the Python environment, 2.7 GB for the cleanup model, 1.6 GB for the
+- About 10 GB of free disk: roughly 3 GB for the Python environment, 4.3 GB for the cleanup model, 1.6 GB for the
   speech model, 0.7 GB for llama.cpp.
 - A microphone.
 
@@ -45,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
 The installer checks your system, creates a venv, installs dependencies, downloads the llama.cpp CUDA build, the
-Qwen3.5-4B Q4_K_M model (from Hugging Face) and the Whisper model, then registers a Task Scheduler task called
+Qwen3.5-4B Q8_0 model (from Hugging Face) and the Whisper model, then registers a Task Scheduler task called
 `LocalFlow` and starts it. It asks for admin once to register the task. First launch on a new GPU architecture can
 take about 30 seconds while CUDA compiles kernels (they are cached afterwards).
 
@@ -230,7 +230,7 @@ localflow/           package: hotkey.py (WH_KEYBOARD_LL hook), audio.py (+ devwa
                      settings_ui.py, history_ui.py, app.py (tray + wiring), autostart.py, config.py,
                      winutil.py (foreground window / process detection)
 bin/llama/           llama.cpp b11381 CUDA 13.4 build (llama-server.exe), downloaded by install.ps1
-models/              Qwen3.5-4B-Q4_K_M.gguf, downloaded by install.ps1
+models/              Qwen3.5-4B-Q8_0.gguf, downloaded by install.ps1
 scripts/register-task.ps1
 tests/               test_unit_*.py (offline), test_cleanup.py, test_e2e.py, bench_streaming.py, gen_bench_corpus.py,
                      test_hotkey_integration.py (drives real keys!), gen_speech.ps1

@@ -589,6 +589,9 @@ class StreamSession:
         self._clean_q.put(None)
 
 
+_LIST_LINE_RE = re.compile(r"^(?:- |\d+\. )")
+
+
 def join_pieces(parts: list[str], pauses: Optional[list[int]] = None, para_pause_ms: int = 900) -> str:
     """Join cleaned pieces. With ``pauses`` (ms of silence before each piece) a long pause after a paragraph that
     already holds >= 3 sentences starts a new paragraph - what the LLM does on its own in a single long pass."""
@@ -602,6 +605,12 @@ def join_pieces(parts: list[str], pauses: Optional[list[int]] = None, para_pause
             out = p
         elif out.endswith("\n") or p.startswith("\n"):
             out += p
+        elif _LIST_LINE_RE.match(out.rsplit("\n", 1)[-1]):
+            out += ("\n" if _LIST_LINE_RE.match(p) else "\n\n") + p     # keep list items on their own lines
+            sentences = words = 0
+        elif _LIST_LINE_RE.match(p):
+            out += "\n" + p                                              # list starts on its own line
+            sentences = words = 0
         elif brk:
             out += "\n\n" + p
             sentences = words = 0

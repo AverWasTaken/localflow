@@ -158,6 +158,14 @@ class Helpers(unittest.TestCase):
         self.assertEqual(join_pieces(["One.", "", "Two."]), "One. Two.")
         self.assertEqual(join_pieces(["List:\n1. a", "\n\nNext"]), "List:\n1. a\n\nNext")
 
+    def test_join_pieces_lists(self):
+        self.assertEqual(join_pieces(["Groceries:\n- Apples\n- Pears", "- Plums"]), "Groceries:\n- Apples\n- Pears\n- Plums")
+        self.assertEqual(join_pieces(["Groceries:\n- Apples\n- Pears", "Then we leave."]),
+                         "Groceries:\n- Apples\n- Pears\n\nThen we leave.")
+        self.assertEqual(join_pieces(["Steps:\n1. a\n2. b", "3. c"]), "Steps:\n1. a\n2. b\n3. c")
+        self.assertEqual(join_pieces(["Grocery list:", "- Apples\n- Pears"]), "Grocery list:\n- Apples\n- Pears")
+        self.assertEqual(join_pieces(["A dash - here.", "Next."]), "A dash - here. Next.")
+
     def test_resampler_matches_oneshot(self):
         from scipy.signal import resample_poly
         rng = np.random.default_rng(1)

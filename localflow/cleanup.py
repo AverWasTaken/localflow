@@ -32,8 +32,8 @@ Cleaning rules:
 3. Fix capitalization, punctuation, and run-on speech. Keep the speaker's exact words, verbs, tone, and meaning. Unless a style line (rule 8) says otherwise, do not rephrase, reword, improve, shorten, or formalize; do not change "are" to "be" or otherwise alter the speaker's grammar choices beyond the rules here.
 4. Spoken punctuation used as a command becomes the symbol: "comma" ",", "period" or "full stop" ".", "question mark" "?", "exclamation point" "!", "colon" ":", "semicolon" ";", "new line" becomes a line break, "new paragraph" becomes a blank line. Only when clearly used as a command; an ordinary use of the word ("a period of time") stays.
 5. Write numbers, times, emails, and URLs the way people type them ("four pm" -> "4 PM", "john at example dot com" -> "john@example.com").
-6. If the speaker clearly dictates a list ("first ... second ...", "number one ...", "bullet ..."), format it as a numbered or bulleted list with one item per line. Otherwise keep prose.
-7. Keep the transcript's language. If it is already clean, return it unchanged.
+6. Lists. (a) If the speaker clearly dictates a list with markers ("first ... second ...", "number one ...", "bullet ..."), format it as a numbered or bulleted list with one item per line. (b) Also make a bulleted list when the speaker names a list ("list", "to-do", "grocery list", "shopping list", "packing list") or gives a count ("I need three things:") and then says 3 or more short items as bare items right after it (also "my grocery list is ..."): write the intro line ending in ":", then one "- Item" line per item, each item capitalized, with no trailing punctuation. Keep prose when the items sit inside a normal sentence, when it is a technical or inline enumeration ("for example, low, high, medium, etc."), when there is no list word or count ("I need to get the tests, the build, and the docs fixed"), or when the speaker is talking about lists or formatting instead of dictating one.
+7. Keep the transcript's language. If, after applying rules 1-6 (including list formatting), the text is already clean, return it unchanged.
 8. A line "[style: NAME]" before the transcript selects a writing style and the line "[style rules: ...]" below it describes that style. Follow the style rules for capitalization, punctuation, tone and wording on top of rules 1-7; they override rule 3 only as far as they say so. A style NEVER permits adding content the speaker did not say (no greetings, sign-offs, names, facts). A line "[previous text: ...]" shows text that was already written just before this transcript: use it only for continuity (tone, capitalization, list numbering, a sentence that continues) and NEVER repeat it or include it in your output. A line "[vocabulary: ...]" lists preferred spellings of names/terms; use them when the transcript clearly refers to them."""
 
 FEWSHOT: list[tuple[str, str]] = [
@@ -57,6 +57,14 @@ FEWSHOT: list[tuple[str, str]] = [
      "Hey John, thanks for the update.\n\nI'll review it tonight and get back to you."),
     ("my shopping list is number one milk number two eggs number three bread",
      "My shopping list is:\n1. Milk\n2. Eggs\n3. Bread"),
+    ("Grocery list, apples, bananas and cherries.",
+     "Grocery list:\n- Apples\n- Bananas\n- Cherries"),
+    ("I need three things from the store. Bananas, apples, and pears.",
+     "I need three things from the store:\n- Bananas\n- Apples\n- Pears"),
+    ("I had apples, bananas, and cherries for lunch today.",
+     "I had apples, bananas, and cherries for lunch today."),
+    ("so when i say a list of colors like red green and blue it should keep them in a sentence not a list",
+     "When I say a list of colors like red, green, and blue, it should keep them in a sentence, not a list."),
     ("email me at sarah dot lee at example dot com i mean sarah dot li at example dot com",
      "Email me at sarah.li@example.com."),
 ]
@@ -213,6 +221,11 @@ def _flat(s: str) -> str:
     return " ".join(s.split())
 
 
+def _flat_keep_lines(s: str) -> str:
+    """Like _flat but keeps line breaks, so list structure in [previous text] stays visible to the model."""
+    return "\n".join(l for l in (" ".join(x.split()) for x in s.strip().splitlines()) if l)
+
+
 class Cleaner:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -273,7 +286,7 @@ class Cleaner:
             msgs.append({"role": "assistant", "content": a})
         header = head
         if context:
-            header += f"[previous text: {_flat(context)}]\n"
+            header += f"[previous text: {_flat_keep_lines(context)}]\n"
         if vocab:
             header += f"[vocabulary: {', '.join(vocab[:40])}]\n"
         msgs.append({"role": "user", "content": self._wrap(raw, header)})
