@@ -220,6 +220,20 @@ Key settings: `hotkey` ("ctrl+alt"; any of ctrl/alt/shift/win), `mic.match` and 
 The first start after an upgrade writes new sections into your config.json so they are easy to edit; your own values
 are kept.
 
+## Game mode (free the GPU while gaming)
+
+When a process listed in `game_mode.processes` is running (default `VALORANT-Win64-Shipping.exe`), LocalFlow unloads
+the speech model and stops the cleanup llama-server so the VRAM goes back to the game. About 10 s after the game
+exits (`exit_grace_s`) both are reloaded, and an overlay toast says so. If the GPU is slow to free up, the reload
+retries (5, 10, 20, 40 s) before falling back to the CPU model. Only process names are read; nothing else about other
+processes is inspected.
+
+While a game runs, `while_active` decides what dictation does: `"off"` (default) ignores the hotkey (error beep, no
+overlay), `"cpu"` keeps dictating on the CPU `small.en` model (4 threads) with regex cleanup instead of the LLM.
+Tray: "Game mode (auto)" toggles `game_mode.enabled`; Settings > General > "Game mode" edits all of it. The tray icon
+turns teal while game mode is on. Config: `enabled`, `processes`, `poll_s` (3), `exit_grace_s` (10), `while_active`.
+Changing `stt.*` settings during a game is applied when the game closes.
+
 ## Layout
 
 ```
@@ -228,7 +242,8 @@ localflow/           package: hotkey.py (WH_KEYBOARD_LL hook), audio.py (+ devwa
                      deterministic style pass), streaming.py (VAD-driven chunked transcription + incremental
                      cleanup), textproc.py, inserter.py (clipboard/SendInput), pipeline.py, overlay.py,
                      settings_ui.py, history_ui.py, app.py (tray + wiring), autostart.py, config.py,
-                     winutil.py (foreground window / process detection)
+                     winutil.py (foreground window / process detection),
+                     gamemode.py (game process watcher)
 bin/llama/           llama.cpp b11381 CUDA 13.4 build (llama-server.exe), downloaded by install.ps1
 models/              Qwen3.5-4B-Q8_0.gguf, downloaded by install.ps1
 scripts/register-task.ps1

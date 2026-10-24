@@ -92,6 +92,7 @@ class LlamaServer:
         self._lock = threading.Lock()
         self._starting = False
         self._last_start = 0.0
+        self.suspended = False      # game mode: never (re)start while set
 
     def _abs(self, p: str) -> Path:
         pp = Path(p)
@@ -104,11 +105,19 @@ class LlamaServer:
     def _kill_stale(self) -> None:
         try:
             import psutil
+            from .gamemode import list_processes
             port = str(self.cfg.get("cleanup.port", 8765))
-            for p in psutil.process_iter(["name", "cmdline"]):
-                if (p.info["name"] or "").lower() == "llama-server.exe" and port in (p.info["cmdline"] or []):
-                    log.info("killing stale llama-server pid %s", p.pid)
-                    p.kill()
+            # find candidates by name from a handle-free snapshot; only llama-server's own command line is read
+            for pid, name in list_processes():
+                if name.lower() != "llama-server.exe":
+                    continue
+                try:
+                    p = psutil.Process(pid)
+                    if port in (p.cmdline() or []):
+                        log.info("killing stale llama-server pid %s", pid)
+                        p.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
         except Exception:
             log.exception("stale server cleanup failed")
 
@@ -127,7 +136,7 @@ class LlamaServer:
 
     def start(self, wait: bool = False) -> None:
         with self._lock:
-            if self._starting or self.ready:
+            if self.suspended or self._starting or self.ready:
                 return
             now = time.monotonic()
             if self.failed and now - self._last_start < RETRY_AFTER_FAILURE_S:
@@ -152,24 +161,36 @@ class LlamaServer:
             cmd = [str(exe), "-m", str(model), "-ngl", str(int(self.cfg.get("cleanup.gpu_layers", 99))),
                    "-c", str(int(self.cfg.get("cleanup.ctx", 4096))), "--host", "127.0.0.1", "--port", str(port),
                    "--jinja", "-fa", "on", "--parallel", "1", "--no-webui", "-t", "4", "--no-mmproj"]
+            if self.suspended:
+                return
             logf = open(DATA_DIR / "llama-server.log", "wb")
             t0 = time.perf_counter()
-            self.proc = subprocess.Popen(cmd, cwd=str(exe.parent), stdout=logf, stderr=subprocess.STDOUT,
-                                         creationflags=0x08000000, stdin=subprocess.DEVNULL)  # CREATE_NO_WINDOW
+            proc = subprocess.Popen(cmd, cwd=str(exe.parent), stdout=logf, stderr=subprocess.STDOUT,
+                                    creationflags=0x08000000, stdin=subprocess.DEVNULL)  # CREATE_NO_WINDOW
+            with self._lock:
+                if self.suspended:      # game mode began while we were spawning: don't leave a GPU process behind
+                    self._kill(proc)
+                    log.info("llama-server start aborted (suspended)")
+                    return
+                self.proc = proc
             self._job = self._make_job()
             if self._job:
                 try:
                     import win32job
                     import win32api
-                    h = win32api.OpenProcess(0x1F0FFF, False, self.proc.pid)
+                    h = win32api.OpenProcess(0x1F0FFF, False, proc.pid)
                     win32job.AssignProcessToJobObject(self._job, h)
                 except Exception:
                     log.exception("assign to job failed")
-            log.info("llama-server started (pid %s)", self.proc.pid)
+            log.info("llama-server started (pid %s)", proc.pid)
             deadline = time.time() + 120
             while time.time() < deadline:
-                if self.proc.poll() is not None:
-                    self.failed = f"llama-server exited with {self.proc.returncode} (see llama-server.log)"
+                if self.suspended or self.proc is not proc:     # stop() / game mode took over: not a failure
+                    self._kill(proc)
+                    log.info("llama-server start aborted (suspended/stopped)")
+                    return
+                if proc.poll() is not None:
+                    self.failed = f"llama-server exited with {proc.returncode} (see llama-server.log)"
                     log.error(self.failed)
                     return
                 try:
@@ -183,18 +204,22 @@ class LlamaServer:
                 self.failed = "llama-server did not become healthy"
                 log.error(self.failed)
                 return
-            log.info("llama-server healthy after %.1fs", time.perf_counter() - t0)
-            self.ready = True
-            self.failed = None
+            with self._lock:
+                if self.suspended or self.proc is not proc:
+                    self._kill(proc)
+                    log.info("llama-server start aborted (suspended/stopped)")
+                    return
+                log.info("llama-server healthy after %.1fs", time.perf_counter() - t0)
+                self.ready = True
+                self.failed = None
         except Exception as e:
             self.failed = f"{type(e).__name__}: {e}"
             log.exception("llama-server start failed")
         finally:
             self._starting = False
 
-    def stop(self) -> None:
-        self.ready = False
-        p, self.proc = self.proc, None
+    @staticmethod
+    def _kill(p) -> None:
         if p and p.poll() is None:
             try:
                 p.terminate()
@@ -202,11 +227,24 @@ class LlamaServer:
             except Exception:
                 try:
                     p.kill()
+                    p.wait(3)
                 except Exception:
                     pass
 
+    def stop(self, wait_start_s: float = 10.0) -> None:
+        """Stop the server. A start in progress notices (proc swapped out / suspended) and cleans itself up;
+        we wait for it so the process is really gone when this returns."""
+        with self._lock:
+            self.ready = False
+            p, self.proc = self.proc, None
+        self._kill(p)
+        end = time.time() + wait_start_s
+        while self._starting and time.time() < end:
+            time.sleep(0.05)
+
     def alive(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+        p = self.proc
+        return p is not None and p.poll() is None
 
 
 # ----------------------------------------------------------------------------- cleaner
@@ -233,7 +271,21 @@ class Cleaner:
         self.http = requests.Session()
         self.last_info: dict = {}
 
+    def suspend(self) -> None:
+        """Game mode: stop the server and keep it down (regex cleanup meanwhile)."""
+        self.server.suspended = True
+        self.server.stop()
+
+    def resume(self) -> None:
+        s = self.server
+        s.failed = None
+        s._last_start = 0.0
+        s.suspended = False
+        self.start()
+
     def start(self) -> None:
+        if self.server.suspended:
+            return
         if self.cfg.get("cleanup.enabled", True):
             self.server.start()
             threading.Thread(target=self._warm, name="llm-warm", daemon=True).start()
@@ -369,6 +421,8 @@ class Cleaner:
                 info["reason"] = "cleanup disabled"
             elif words < int(self.cfg.get("cleanup.min_words", 4)):
                 info["reason"] = "short utterance"
+            elif self.server.suspended:
+                info["reason"] = "game mode"
             elif not self.server.ready:
                 info["reason"] = "llm not ready"
                 if self.server.failed or (self.server.proc is not None and not self.server.alive()):
@@ -387,7 +441,7 @@ class Cleaner:
         except Exception as e:
             log.warning("LLM cleanup error: %s: %s", type(e).__name__, e)
             info["reason"] = f"error: {type(e).__name__}"
-            if isinstance(e, requests.ConnectionError):
+            if isinstance(e, requests.ConnectionError) and not self.server.suspended:
                 self.server.ready = False
                 self.server.start()
         text = textproc.regex_clean(raw, sd, abbr, vocab, post=final)

@@ -100,11 +100,20 @@ DEFAULTS: dict[str, Any] = {
     },
     "snippets": {},             # {"spoken trigger": "expansion text"}
     "history": {"enabled": True, "max_entries": 5000},
+    # Free the GPU while a game runs: unload the speech + cleanup models, reload when the game has been gone a while.
+    # while_active: "off" = dictation paused, "cpu" = dictation on a small CPU model with regex cleanup (no LLM)
+    "game_mode": {
+        "enabled": True,
+        "processes": ["VALORANT-Win64-Shipping.exe"],   # process names only (never inspected further)
+        "poll_s": 3,
+        "exit_grace_s": 10,
+        "while_active": "off",
+    },
 }
 
 
 # top-level sections introduced after v1: written into an existing config.json the first time
-PERSISTED_KEYS = {"auto_style", "profiles", "process_groups", "styles", "abbreviations", "streaming"}
+PERSISTED_KEYS = {"auto_style", "profiles", "process_groups", "styles", "abbreviations", "streaming", "game_mode"}
 
 
 def deep_merge(base: dict, over: dict) -> dict:

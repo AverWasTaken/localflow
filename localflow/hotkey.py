@@ -123,6 +123,8 @@ class HotkeyManager:
             if not enabled and self.state in ("hold", "locked"):
                 self._fire(self._cb_cancel, "paused")
                 self.state = "suppressed"
+            elif enabled and self.state == "suppressed":
+                self.state = "suppressed" if self._held_mods() else "idle"
 
     def force_idle(self) -> None:
         """Called by the app when it ends a recording itself (e.g. max duration)."""

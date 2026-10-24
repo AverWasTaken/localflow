@@ -590,6 +590,47 @@ class SettingsWindow(QWidget):
                   "\"streaming\".", self.stream_sw)
         lay.addWidget(c)
 
+        # --- game mode
+        c = Card("Game mode")
+        self.game_sw = Switch()
+        c.add_row("Free the GPU while gaming", "Unloads the speech and cleanup models when a listed game starts and "
+                  "reloads them shortly after it closes. Only process names are checked.", self.game_sw)
+        self.game_mode_combo = _combo(250)
+        self.game_mode_combo.addItem("Dictation off", "off")
+        self.game_mode_combo.addItem("Dictation on CPU (basic cleanup)", "cpu")
+        c.add_row("While a game runs", "CPU dictation uses a small English model and no AI cleanup.",
+                  self.game_mode_combo)
+        w = QWidget()
+        gl = QVBoxLayout(w)
+        gl.setContentsMargins(0, 8, 0, 10)
+        gl.setSpacing(10)
+        hint = QLabel("Game process names (e.g. VALORANT-Win64-Shipping.exe).")
+        hint.setObjectName("rowDesc")
+        hint.setWordWrap(True)
+        gl.addWidget(hint)
+        self.game_list = QListWidget()
+        self.game_list.setObjectName("plain")
+        self.game_list.setMinimumHeight(90)
+        self.game_list.setMaximumHeight(140)
+        self.game_list.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        self.game_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        gl.addWidget(self.game_list)
+        r = QHBoxLayout()
+        r.setSpacing(8)
+        self.game_edit = QLineEdit()
+        self.game_edit.setPlaceholderText("Add a process name...")
+        self.game_edit.returnPressed.connect(self._add_game)
+        add = _btn("Add", "primary", 80)
+        add.clicked.connect(self._add_game)
+        rm = _btn("Remove selected", "danger")
+        rm.clicked.connect(self._remove_games)
+        r.addWidget(self.game_edit, 1)
+        r.addWidget(add)
+        r.addWidget(rm)
+        gl.addLayout(r)
+        c.add_widget(w)
+        lay.addWidget(c)
+
         # --- interface
         c = Card("Interface")
         self.overlay_sw = Switch()
@@ -1111,6 +1152,25 @@ class SettingsWindow(QWidget):
         it.setFlags(it.flags() | Qt.ItemIsEditable)
         self.words_list.addItem(it)
 
+    def _add_game(self) -> None:
+        g = self.game_edit.text().strip()
+        if not g:
+            return
+        existing = {self.game_list.item(i).text().lower() for i in range(self.game_list.count())}
+        if g.lower() not in existing:
+            self._append_game(g)
+            self.game_list.scrollToBottom()
+        self.game_edit.clear()
+
+    def _append_game(self, g: str) -> None:
+        it = QListWidgetItem(g)
+        it.setFlags(it.flags() | Qt.ItemIsEditable)
+        self.game_list.addItem(it)
+
+    def _remove_games(self) -> None:
+        for it in self.game_list.selectedItems():
+            self.game_list.takeItem(self.game_list.row(it))
+
     def _remove_words(self) -> None:
         for it in self.words_list.selectedItems():
             self.words_list.takeItem(self.words_list.row(it))
@@ -1218,6 +1278,11 @@ class SettingsWindow(QWidget):
         self.space_sw.setChecked(bool(cfg.get("insert.trailing_space", False)))
         self.cleanup_sw.setChecked(bool(cfg.get("cleanup.enabled", True)))
         self.stream_sw.setChecked(bool(cfg.get("streaming.enabled", True)))
+        self.game_sw.setChecked(bool(cfg.get("game_mode.enabled", True)))
+        _set_combo_data(self.game_mode_combo, cfg.get("game_mode.while_active", "off"))
+        self.game_list.clear()
+        for g in cfg.get("game_mode.processes", []) or []:
+            self._append_game(str(g))
         self.minwords_spin.setValue(int(cfg.get("cleanup.min_words", 4)))
         self.overlay_sw.setChecked(bool(cfg.get("ui.overlay", True)))
         self.sounds_sw.setChecked(bool(cfg.get("ui.sounds", True)))
@@ -1261,6 +1326,12 @@ class SettingsWindow(QWidget):
             if w and w.lower() not in seen:
                 seen.add(w.lower())
                 words.append(w)
+        games, gseen = [], set()
+        for i in range(self.game_list.count()):
+            g = self.game_list.item(i).text().strip()
+            if g and g.lower() not in gseen:
+                gseen.add(g.lower())
+                games.append(g)
         repl = {}
         for r in range(self.repl_table.rowCount()):
             a = (self.repl_table.item(r, 0).text() if self.repl_table.item(r, 0) else "").strip()
@@ -1285,6 +1356,8 @@ class SettingsWindow(QWidget):
                        "trailing_space": self.space_sw.isChecked()},
             "cleanup": {"enabled": self.cleanup_sw.isChecked(), "min_words": self.minwords_spin.value()},
             "streaming": {"enabled": self.stream_sw.isChecked()},
+            "game_mode": {"enabled": self.game_sw.isChecked(), "processes": games,
+                          "while_active": self.game_mode_combo.currentData() or "off"},
             "ui": {"overlay": self.overlay_sw.isChecked(), "sounds": self.sounds_sw.isChecked(),
                    "sound_volume": round(self.vol_slider.value() / 100.0, 2)},
             "dictionary": {"words": words, "replacements": repl},

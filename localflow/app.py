@@ -16,6 +16,7 @@ from . import __version__, autostart, sounds, styles, winutil
 from .audio import AudioInput, default_input_name, input_device_names
 from .cleanup import Cleaner
 from .config import Config
+from .gamemode import GameWatcher
 from .history import History
 from .hotkey import HotkeyManager
 from .inserter import insert_text
@@ -23,7 +24,7 @@ from .overlay import Overlay
 from .paths import LOG_PATH
 from .pipeline import Pipeline
 from .streaming import StreamSession
-from .stt import Transcriber
+from .stt import ModelUnloaded, Transcriber
 
 log = logging.getLogger("localflow")
 
@@ -33,7 +34,8 @@ def make_icon(state: str = "ready") -> QIcon:
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    col = {"ready": "#7c6cff", "paused": "#6b6b78", "busy": "#f5a524", "error": "#ef4444"}.get(state, "#7c6cff")
+    col = {"ready": "#7c6cff", "paused": "#6b6b78", "busy": "#f5a524", "error": "#ef4444",
+           "game": "#2dd4bf"}.get(state, "#7c6cff")
     p.setBrush(QBrush(QColor(col)))
     p.setPen(Qt.NoPen)
     p.drawRoundedRect(2, 2, 60, 60, 16, 16)
@@ -89,6 +91,11 @@ class LocalFlowApp:
         self._status = "Starting..."
         self._ready = False
         self.last_result: dict = {}
+        # game mode: one lock serializes every GPU model load/unload (boot, cfg reload, game enter/exit)
+        self._gpu_lock = threading.RLock()
+        self.game_active = False       # GPU models are (being) unloaded; guarded by _gpu_lock for writes
+        self._game_ui = False          # tray shows the game state
+        self.watcher = GameWatcher(self.cfg, self._game_enter, self._game_exit)
 
     # ------------------------------------------------------------------ overlay/sound helpers
     def _ov(self, state: str, text: str = "") -> None:
@@ -131,8 +138,22 @@ class LocalFlowApp:
                 self._recording = False
                 self._ov("hidden")
 
+    def _game_blocks(self) -> bool:
+        """True while game mode keeps dictation off (no speech model on purpose)."""
+        return self.game_active and (self.cfg.get("game_mode.while_active", "off") != "cpu" or self.stt.model is None)
+
+    def _sync_hotkey(self) -> None:
+        """Hotkey hook is switched off while game mode blocks dictation (no beeps / injected keys during a game)."""
+        self.hotkey.set_enabled(bool(self.cfg.get("enabled", True)) and not self._game_blocks())
+
     def _do_start(self) -> None:
         if self._recording:
+            return
+        if self._game_blocks():
+            # no overlay: it could steal focus / flicker over a fullscreen game
+            log.info("hotkey ignored: game mode")
+            self.hotkey.force_idle()
+            self._snd("error")
             return
         self._rec_id += 1
         rid = self._rec_id
@@ -227,9 +248,14 @@ class LocalFlowApp:
                 continue
             try:
                 waited = 0
-                while not self.stt.ready and waited < 120 and not self._shutdown.is_set():
+                while not self.stt.ready and waited < 120 and not self._shutdown.is_set() \
+                        and not self._game_blocks():
                     time.sleep(0.25)
                     waited += 0.25
+                if not self.stt.ready and self._game_blocks():
+                    log.info("dictation dropped: game mode")
+                    self._ov("hidden")
+                    continue
                 if not self.stt.ready:
                     self._ov("error", "Speech model not ready")
                     self._snd("error")
@@ -245,6 +271,9 @@ class LocalFlowApp:
                 else:
                     self._ov("error", "Couldn't insert text")
                     self._snd("error")
+            except ModelUnloaded:
+                log.info("dictation dropped: speech model unloaded (game mode)")
+                self._ov("hidden")
             except Exception:
                 log.exception("dictation failed")
                 self._ov("error", "Transcription failed")
@@ -254,27 +283,128 @@ class LocalFlowApp:
     def _boot(self) -> None:
         try:
             self.audio.start()
-            self._set_status(f"Loading speech model...", "busy")
-            self.stt.load()
-            try:   # load the VAD used for chunked transcription now, not on the first long dictation
-                from faster_whisper.vad import get_vad_model
-                get_vad_model()
-            except Exception:
-                log.exception("VAD preload failed")
-            self.cleaner.start()
-            gpu = "GPU" if self.stt.device == "cuda" else "CPU (fallback)"
+            with self._gpu_lock:
+                if self.game_active:        # game already running at startup: keep the GPU free
+                    self.cleaner.server.suspended = True
+                    self._game_ui = True
+                    self._load_game_cpu_model()
+                    self._sync_hotkey()
+                    self._ready = True
+                    self._set_status(self._game_text(), "game")
+                    log.info("READY (game mode): stt=%s/%s", self.stt.model_name, self.stt.device)
+                    return
+                self._set_status(f"Loading speech model...", "busy")
+                self.stt.load()
+                try:   # load the VAD used for chunked transcription now, not on the first long dictation
+                    from faster_whisper.vad import get_vad_model
+                    get_vad_model()
+                except Exception:
+                    log.exception("VAD preload failed")
+                self.cleaner.start()
+                dev, mname, comp = self.stt.device, self.stt.model_name, self.stt.compute
+            gpu = "GPU" if dev == "cuda" else "CPU (fallback)"
             mic = self.audio.device_name
             self._ready = True
-            self._set_status(f"Ready - {self.stt.model_name} on {gpu} - mic: {mic}",
-                             "ready" if self.stt.device == "cuda" else "error")
-            if self.stt.device != "cuda":
-                self._ov("error", "GPU unavailable - using CPU")
-            log.info("READY: stt=%s/%s/%s mic=%s", self.stt.model_name, self.stt.device, self.stt.compute, mic)
+            if not self.game_active:        # a game may have started while the models were loading
+                self._set_status(f"Ready - {mname} on {gpu} - mic: {mic}", "ready" if dev == "cuda" else "error")
+                if dev != "cuda":
+                    self._ov("error", "GPU unavailable - using CPU")
+            log.info("READY: stt=%s/%s/%s mic=%s", mname, dev, comp, mic)
         except Exception:
             log.exception("boot failed")
             self._set_status("Startup failed - see log", "error")
 
+    # ------------------------------------------------------------------ game mode
+    def _game_text(self) -> str:
+        if self.cfg.get("game_mode.while_active", "off") == "cpu":
+            return "Game mode: GPU models unloaded (dictation on CPU)"
+        return "Game mode: GPU models unloaded"
+
+    def _load_game_cpu_model(self) -> None:
+        if self.cfg.get("game_mode.while_active", "off") != "cpu":
+            return
+        try:
+            self.stt.load(strict=True, device="cpu", compute="int8",
+                          name=self.cfg.get("stt.cpu_fallback_model", "small.en"), cpu_threads=4)
+        except Exception:
+            log.exception("game mode: CPU speech model failed to load - dictation stays off")
+
+    def _game_enter(self) -> None:
+        with self._gpu_lock:
+            t0 = time.perf_counter()
+            self.game_active = True
+            self._game_ui = True
+            if self._recording:
+                self.hotkey.force_idle()
+                self._ctl.put(("cancel", "game mode"))
+            self.cleaner.suspend()
+            self.stt.unload()
+            self._sync_hotkey()         # hook off right away in "off" mode (CPU load below can take seconds)
+            self._load_game_cpu_model()
+            self._sync_hotkey()
+            self._set_status(self._game_text(), "game")
+            log.info("game mode ON: GPU models unloaded in %.1fs", time.perf_counter() - t0)
+
+    def _game_back(self) -> bool:
+        """The game came back while we were reloading: unload again instead of loading under it."""
+        if not self.watcher.game_running() or not self.cfg.get("game_mode.enabled", True):
+            return False
+        log.info("game mode: game relaunched during reload - staying in game mode")
+        self.watcher.active = True
+        self._game_enter()
+        return True
+
+    def _game_exit(self) -> None:
+        with self._gpu_lock:
+            if not self.game_active:
+                return
+            t0 = time.perf_counter()
+            self._game_ui = False
+            self._set_status("Reloading models after game...", "busy")
+            loaded = False
+            delays = (5, 10, 20, 40)
+            for i in range(len(delays) + 1):
+                if self._game_back():
+                    return
+                try:
+                    self.stt.load(strict=True)
+                    loaded = True
+                    break
+                except Exception as e:
+                    log.warning("game mode: GPU speech load failed (%s: %s) attempt %d/%d", type(e).__name__, e,
+                                i + 1, len(delays) + 1)
+                    if i < len(delays) and self._shutdown.wait(delays[i]):
+                        return
+            if self._game_back():
+                return
+            try:
+                if not loaded:
+                    log.error("game mode: GPU speech model never loaded - falling back to CPU")
+                    self.stt.load()
+                try:
+                    from faster_whisper.vad import get_vad_model
+                    get_vad_model()
+                except Exception:
+                    log.exception("VAD preload failed")
+                self.cleaner.resume()
+            except Exception:
+                log.exception("game mode: reload after game failed")
+            finally:
+                self.game_active = False        # never leave the hotkey dead, whatever failed above
+                self._sync_hotkey()
+            if not self.stt.ready:
+                self._set_status("Speech model failed to load - see log", "error")
+                return
+            gpu = "GPU" if self.stt.device == "cuda" else "CPU (fallback)"
+            self._set_status(f"Ready - {self.stt.model_name} on {gpu} - mic: {self.audio.device_name}",
+                             "ready" if self.stt.device == "cuda" else "error")
+            if not self.watcher.game_running():     # disabled by hand while the game still runs: no toast over it
+                self._ov("info", "Game closed - models reloaded")
+            log.info("game mode OFF: models reloaded in %.1fs (stt=%s)", time.perf_counter() - t0, self.stt.device)
+
     def _set_status(self, text: str, icon: str) -> None:
+        if self._game_ui and icon != "paused":
+            text, icon = self._game_text(), "game"
         self._status = text
         self.bridge.status.emit(text, icon if self.cfg.get("enabled", True) else "paused")
 
@@ -296,17 +426,32 @@ class LocalFlowApp:
                 self.hotkey.set_handsfree_key(self.cfg.get("handsfree_key"))
             if ch("enabled"):
                 en = bool(self.cfg.get("enabled"))
-                self.hotkey.set_enabled(en)
+                self._sync_hotkey()
                 self._set_status("Ready" if en else "Paused", "ready" if en else "paused")
                 self._ov("info", "Resumed" if en else "Paused")
             if ch("mic") or ch("audio", "keep_open"):
                 self.audio.reopen()
                 self._set_status(f"Ready - mic: {self.audio.device_name}", "ready")
             if ch("stt", "model") or ch("stt", "device") or ch("stt", "compute_type"):
-                self.stt.ready = False
-                self._set_status("Reloading speech model...", "busy")
-                self.stt.load()
-                self._set_status(f"Ready - {self.stt.model_name} ({self.stt.device})", "ready")
+                with self._gpu_lock:
+                    if self.game_active:
+                        # deferred: _game_exit loads from the then-current config
+                        log.info("stt config changed during game mode - applied when the game closes")
+                    else:
+                        self.stt.ready = False
+                        self._set_status("Reloading speech model...", "busy")
+                        self.stt.load()
+                        self._set_status(f"Ready - {self.stt.model_name} ({self.stt.device})", "ready")
+            if ch("game_mode", "while_active"):
+                with self._gpu_lock:
+                    if self.game_active:
+                        if self.cfg.get("game_mode.while_active", "off") == "cpu":
+                            self._load_game_cpu_model()
+                        else:
+                            self.stt.unload()
+                            self._sync_hotkey()
+                        self._sync_hotkey()
+                        self._set_status(self._game_text(), "game")
             if ch("cleanup", "enabled") and self.cfg.get("cleanup.enabled"):
                 self.cleaner.start()
             if ch("ui", "sound_volume"):
@@ -330,6 +475,9 @@ class LocalFlowApp:
         self.act_cleanup = menu.addAction("AI cleanup")
         self.act_cleanup.setCheckable(True)
         self.act_cleanup.triggered.connect(self.toggle_cleanup)
+        self.act_game = menu.addAction("Game mode (auto)")
+        self.act_game.setCheckable(True)
+        self.act_game.triggered.connect(self.toggle_game_mode)
         self.act_autostyle = menu.addAction("Auto style by app")
         self.act_autostyle.setCheckable(True)
         self.act_autostyle.triggered.connect(self.toggle_auto_style)
@@ -358,6 +506,7 @@ class LocalFlowApp:
         self.act_pause.setText("Pause dictation" if en else "Resume dictation")
         self.act_cleanup.setChecked(bool(self.cfg.get("cleanup.enabled", True)))
         self.act_autostyle.setChecked(bool(self.cfg.get("auto_style", True)))
+        self.act_game.setChecked(bool(self.cfg.get("game_mode.enabled", True)))
 
     def _fill_mic_menu(self) -> None:
         self.mic_menu.clear()
@@ -392,6 +541,9 @@ class LocalFlowApp:
         self.cfg.set("cleanup.enabled", on)
         self._ov("info", "AI cleanup on" if on else "AI cleanup off")
 
+    def toggle_game_mode(self) -> None:
+        self.cfg.set("game_mode.enabled", not self.cfg.get("game_mode.enabled", True))
+
     def toggle_auto_style(self) -> None:
         on = not self.cfg.get("auto_style", True)
         self.cfg.set("auto_style", on)
@@ -418,6 +570,7 @@ class LocalFlowApp:
         log.info("quitting")
         self._shutdown.set()
         try:
+            self.watcher.stop()
             self.hotkey.stop()
             self.audio.stop()
             self.cleaner.shutdown()
@@ -440,7 +593,12 @@ class LocalFlowApp:
         ok = self.hotkey.start()
         if not ok:
             log.error("keyboard hook failed to install")
+        try:    # first poll BEFORE boot: a game that is already running keeps the GPU models from loading at all
+            self.game_active = self.watcher.detect_initial()
+        except Exception:
+            log.exception("game mode initial poll failed")
         threading.Thread(target=self._boot, name="boot", daemon=True).start()
+        self.watcher.start()
         log.info("LocalFlow %s started (hotkey=%s)", __version__, self.cfg.get("hotkey"))
         return self.qapp.exec()
 

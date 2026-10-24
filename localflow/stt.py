@@ -96,6 +96,10 @@ class STTResult:
     segments: list = field(default_factory=list)
 
 
+class ModelUnloaded(RuntimeError):
+    """transcribe() was called while the model is unloaded (game mode)."""
+
+
 class Transcriber:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -138,44 +142,71 @@ class Transcriber:
         except Exception:
             return repo, False   # let faster-whisper download it
 
-    def load(self) -> None:
+    def _install(self, model, device: str, compute: str, name: str) -> None:
+        with self._lock:
+            self.model = model
+            self.device, self.compute, self.model_name = device, compute, name
+
+    def unload(self) -> None:
+        """Drop the model and give its weights back to the GPU (waits for a running transcription)."""
+        with self._lock:
+            self.ready = False
+            m, self.model = self.model, None
+            self.device, self.compute, self.model_name = "unloaded", "?", "?"
+            if m is not None:
+                try:
+                    m.model.unload_model()
+                except Exception:
+                    log.debug("unload_model failed", exc_info=True)
+            del m
+        import gc
+        gc.collect()
+        log.info("STT unloaded")
+
+    def load(self, strict: bool = False, device: Optional[str] = None, compute: Optional[str] = None,
+             name: Optional[str] = None, cpu_threads: Optional[int] = None) -> None:
+        """Load the model from cfg ``stt.*`` (or the given overrides). With ``strict`` a failure raises instead of
+        silently falling back to the CPU model."""
         add_cuda_dll_dirs()
         from faster_whisper import WhisperModel
         self._patch_dynamic_padding()
         st = self.cfg.get("stt", {})
         t0 = time.perf_counter()
-        name = st.get("model", "large-v3-turbo")
-        device = st.get("device", "cuda")
-        compute = st.get("compute_type", "float16")
+        name = name or st.get("model", "large-v3-turbo")
+        device = device or st.get("device", "cuda")
+        compute = compute or st.get("compute_type", "float16")
         try:
             if device == "cuda" and _cuda_device_count() == 0:
                 # skip straight to the CPU model instead of downloading the big GPU model just to fail on it
                 raise RuntimeError("no CUDA device available")
             path, _ = self._resolve(name)
-            self.model = WhisperModel(path, device=device, compute_type=compute)
-            self.device, self.compute, self.model_name = device, compute, name
-            self._warmup()
+            extra = {"cpu_threads": int(cpu_threads)} if cpu_threads else {}
+            model = WhisperModel(path, device=device, compute_type=compute, **extra)
+            self._warmup(model)
+            self._install(model, device, compute, name)
         except Exception as e:
+            if strict:
+                raise
             log.error("!!! GPU/primary STT load FAILED (%s: %s) - falling back to CPU int8 %s !!!",
                       type(e).__name__, e, st.get("cpu_fallback_model", "small.en"))
             self.error = f"{type(e).__name__}: {e}"
             fb = st.get("cpu_fallback_model", "small.en")
             path, _ = self._resolve(fb)
-            self.model = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=8)
-            self.device, self.compute, self.model_name = "cpu", "int8", fb
-            self._warmup()
+            model = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=8)
+            self._warmup(model)
+            self._install(model, "cpu", "int8", fb)
         self.load_ms = int((time.perf_counter() - t0) * 1000)
         self.ready = True
         log.info("STT ready: model=%s device=%s compute=%s load=%d ms", self.model_name, self.device,
                  self.compute, self.load_ms)
 
-    def _warmup(self) -> None:
+    def _warmup(self, model) -> None:
         t = time.perf_counter()
         rng = np.random.default_rng(0)
         audio = (rng.standard_normal(16000 * 2) * 0.01).astype(np.float32)
         for _ in range(2):
-            segs, _ = self.model.transcribe(audio, beam_size=1, vad_filter=False, language="en",
-                                            without_timestamps=True)
+            segs, _ = model.transcribe(audio, beam_size=1, vad_filter=False, language="en",
+                                       without_timestamps=True)
             list(segs)
         log.info("STT warm-up took %d ms", (time.perf_counter() - t) * 1000)
 
@@ -189,6 +220,8 @@ class Transcriber:
 
     def _transcribe(self, audio: np.ndarray, hotwords: list[str] | None, initial_prompt: str | None) -> STTResult:
         st = self.cfg.get("stt", {})
+        if self.model is None:
+            raise ModelUnloaded("speech model is unloaded (game mode)")
         res = STTResult(duration_s=len(audio) / 16000.0)
         t0 = time.perf_counter()
         lang = st.get("language", "en")
