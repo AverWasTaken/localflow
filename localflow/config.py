@@ -56,7 +56,7 @@ DEFAULTS: dict[str, Any] = {
         "server_exe": "bin/llama/llama-server.exe",
         "port": 8765,
         "gpu_layers": 99,
-        "ctx": 4096,
+        "ctx": 8192,
         "timeout_s": 5.0,
         "max_len_ratio": 1.6,        # sanity guard on output/input length
     },
