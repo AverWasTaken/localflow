@@ -4,7 +4,7 @@ Starts its OWN llama-server (default :8799, never the app's :8765), runs a synth
 writes JSON, and stops the server.
 
   python scripts/eval_lists.py --label new-q8 --model models/Qwen3.5-4B-Q8_0.gguf --out out.json
-  python scripts/eval_lists.py --label old-q4 --model models/Qwen3.5-4B-Q4_K_M.gguf --baseline-rev HEAD --out old.json
+  python scripts/eval_lists.py --label old-q4 --model models/Qwen3.5-4B-Q4_K_M.gguf --baseline-rev main --out old.json
 
 --baseline-rev REV  loads localflow/cleanup.py from that git revision (old prompt + old code) instead of the working tree.
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# (raw, style, kind, expectation) - kind: "list" must contain bullets, "prose" must have no newline, "any" is informational
+# (raw, style, kind) - kind: "list" must contain bullets, "prose" must have no newline, "any" is informational
 SYNTH = [
     ("Grocery list, apples, bananas and cherries.", "neutral", "list"),
     ("grocery list apples bananas and cherries", "neutral", "list"),

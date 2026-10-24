@@ -165,6 +165,13 @@ class Helpers(unittest.TestCase):
         self.assertEqual(join_pieces(["Steps:\n1. a\n2. b", "3. c"]), "Steps:\n1. a\n2. b\n3. c")
         self.assertEqual(join_pieces(["Grocery list:", "- Apples\n- Pears"]), "Grocery list:\n- Apples\n- Pears")
         self.assertEqual(join_pieces(["A dash - here.", "Next."]), "A dash - here. Next.")
+        self.assertEqual(join_pieces(["List:\n- Apples\n- Bananas", "and cherries."]),
+                         "List:\n- Apples\n- Bananas and cherries.")
+        self.assertEqual(join_pieces(["We grew by", "10. That is a lot."]), "We grew by 10. That is a lot.")
+
+    def test_flat_keep_lines(self):
+        from localflow.cleanup import _flat_keep_lines
+        self.assertEqual(_flat_keep_lines("  Groceries:\n-  Apples\n\n- Pears \n"), "Groceries:\n- Apples\n- Pears")
 
     def test_resampler_matches_oneshot(self):
         from scipy.signal import resample_poly

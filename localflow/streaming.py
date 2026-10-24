@@ -499,7 +499,7 @@ class StreamSession:
 
     def _context_before(self, i: int) -> str:
         with self._ulk:
-            prev = " ".join((u.cleaned if u.cleaned is not None else u.raw) for u in self._units[:i])
+            prev = join_pieces([(u.cleaned if u.cleaned is not None else u.raw) for u in self._units[:i]])
         prev = prev.strip()
         if len(prev) > self.context_chars:
             prev = prev[-self.context_chars:]
@@ -606,9 +606,10 @@ def join_pieces(parts: list[str], pauses: Optional[list[int]] = None, para_pause
         elif out.endswith("\n") or p.startswith("\n"):
             out += p
         elif _LIST_LINE_RE.match(out.rsplit("\n", 1)[-1]):
-            out += ("\n" if _LIST_LINE_RE.match(p) else "\n\n") + p     # keep list items on their own lines
+            # keep list items on their own lines; a lowercase piece just finishes the last item
+            out += ("\n" if _LIST_LINE_RE.match(p) else " " if p[0].islower() else "\n\n") + p
             sentences = words = 0
-        elif _LIST_LINE_RE.match(p):
+        elif _LIST_LINE_RE.match(p) and (p[0] == "-" or p.startswith("1.")):
             out += "\n" + p                                              # list starts on its own line
             sentences = words = 0
         elif brk:
