@@ -90,6 +90,7 @@ DEFAULT_EXAMPLES: dict[str, list[list[str]]] = {
         ["Honestly I thought the movie was fine, but to be honest the ending was kind of boring.",
          "honestly i thought the movie was fine but tbh the ending was kinda boring"],
         ["Can you send me the link? Let me know when you're free.", "can you send me the link? lmk when youre free"],
+        ["Grocery list, apples, bananas and cherries.", "grocery list:\n- apples\n- bananas\n- cherries"],
     ],
     "professional": [
         ["hey can you send me that report by friday thanks", "Hi, could you send me the report by Friday? Thanks."],
@@ -100,6 +101,7 @@ DEFAULT_EXAMPLES: dict[str, list[list[str]]] = {
          "I looked at the numbers and they don't match what finance sent us yesterday."],
         ["can you let me know if the 3 pm call works for you",
          "Could you let me know if the 3 PM call works for you?"],
+        ["Grocery list, apples, bananas and cherries.", "Grocery list:\n- Apples\n- Bananas\n- Cherries"],
     ],
     "code": [
         ["uh add a null check before the loop and then return early",
