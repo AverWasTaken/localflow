@@ -70,6 +70,28 @@ DEFAULT_STYLES: dict[str, dict[str, Any]] = {
         "capitalize": True,
         "paragraphs": True,
     },
+    "email": {
+        "description": "Email: professional tone, plus greeting / body / closing on separate lines.",
+        "prompt": ("Email writing. Same tone as professional writing: proper capitalization and punctuation, complete "
+                   "sentences, correct grammar, no slang (\"can you\" -> \"could you\", \"gonna\" -> \"going to\"). "
+                   "LAYOUT: if the speaker opens with a greeting (hi, hello, hey, dear + a name or \"there\") and then "
+                   "says more than one short sentence, put the greeting alone on the first line ending in a comma, then a "
+                   "blank line, then the body. A sentence like \"Thanks for the update\" at the start is body text, not a "
+                   "greeting. In a longer body, start a new paragraph (blank line) only at a clear change of topic. If "
+                   "the speaker ends with a closing (thanks, thank you, best, cheers, talk soon, have a good day), put "
+                   "it on its own last line after a blank line; if the closing is glued onto the end of a sentence, end "
+                   "that sentence with a period and start the closing as its own sentence on its own last line. "
+                   "SHORT MESSAGES (a greeting plus one short sentence, or one or two short sentences) stay on ONE line "
+                   "with no line breaks at all. ONLY lay out what was said: never ADD a greeting, sign-off, name, "
+                   "subject line or fact that was not said. Keep contractions as the speaker used them."),
+        "lowercase": False,
+        "strip_trailing_period": False,
+        "abbreviations": False,
+        "capitalize": True,
+        "paragraphs": True,
+        "whole_cleanup": True,   # clean the whole dictation in one LLM call so greeting and closing are seen together
+        "email_layout": True,    # deterministic greeting / closing line breaks (also on the regex fallback)
+    },
     "code": {
         "description": "Editors and terminals: literal wording, no capitalised first letter, no final period.",
         "prompt": ("Code/terminal context. Keep the wording literal, do not capitalize the first letter of "
@@ -102,6 +124,28 @@ DEFAULT_EXAMPLES: dict[str, list[list[str]]] = {
         ["can you let me know if the 3 pm call works for you",
          "Could you let me know if the 3 PM call works for you?"],
         ["Grocery list, apples, bananas and cherries.", "Grocery list:\n- Apples\n- Bananas\n- Cherries"],
+    ],
+    "email": [
+        ["Hi Sarah, I wanted to follow up on the invoice from last week. Could you let me know when it will be paid? "
+         "Thanks, talk soon.",
+         "Hi Sarah,\n\nI wanted to follow up on the invoice from last week. Could you let me know when it will be "
+         "paid?\n\nThanks, talk soon."],
+        ["Hi Mark, the shipment arrived damaged so I'd like to request a replacement if possible but thanks for your "
+         "help anyway, talk soon.",
+         "Hi Mark,\n\nThe shipment arrived damaged, so I'd like to request a replacement if possible.\n\n"
+         "Thanks for your help anyway, talk soon."],
+        ["Hi John, sounds good, see you then.", "Hi John, sounds good, see you then."],
+        ["Thanks for sending the files. I checked them and everything looks right. I will upload them tonight. "
+         "Let me know if you need anything else.",
+         "Thanks for sending the files. I checked them and everything looks right. I will upload them tonight. "
+         "Let me know if you need anything else."],
+        ["Sounds good, see you then.", "Sounds good, see you then."],
+        ["So I reviewed the draft and I think the second section needs more detail. The numbers in the table also "
+         "don't match the summary.",
+         "I reviewed the draft, and I think the second section needs more detail. The numbers in the table also "
+         "don't match the summary."],
+        ["um so we gonna need to push the launch back a week cause the testing aint done",
+         "We are going to need to push the launch back a week because the testing is not done."],
     ],
     "code": [
         ["uh add a null check before the loop and then return early",
@@ -191,16 +235,16 @@ DEFAULT_PROFILES: list[dict[str, Any]] = [
        style="casual"),
     # --- professional
     _b(name="Gmail", process=["@browsers"], title=r"(?:^|[-–—|]\s*)Gmail(?:\s*[-–—|]|$)",
-       style="professional"),
+       style="email"),
     _b(name="Outlook", process=["outlook.exe", "olk.exe", "hxoutlook.exe", "hxmail.exe", "thunderbird.exe",
-                                "mailspring.exe", "em client.exe", "emclient.exe"], style="professional"),
+                                "mailspring.exe", "em client.exe", "emclient.exe"], style="email"),
     _b(name="Outlook / Office web", process=["@browsers"],
-       title=r"\bOutlook\b|outlook\.(?:live|office)|\bOffice 365 Mail\b", style="professional"),
+       title=r"\bOutlook\b|outlook\.(?:live|office)|\bOffice 365 Mail\b", style="email"),
     _b(name="Google Docs", process=["@browsers"], title=r"[-–—]\s*Google Docs\b", style="professional"),
     _b(name="Word", process=["winword.exe"], style="professional"),
     _b(name="LinkedIn", process=["@browsers"], title=r"\bLinkedIn\b", style="professional"),
     _b(name="Proton / Yahoo mail", process=["@browsers"], title=r"\bProton\s*Mail\b|\bYahoo\s*Mail\b",
-       style="professional"),
+       style="email"),
     # --- code
     _b(name="Code editors", process=[
         "code.exe", "code - insiders.exe", "cursor.exe", "windsurf.exe", "zed.exe", "devenv.exe", "idea64.exe",
@@ -409,6 +453,60 @@ def strip_final_period(text: str, mode: Any) -> str:
     return t[:-1].rstrip()
 
 
+# --- email layout: greeting / closing on their own lines (deterministic, idempotent)
+_EM_GREET = re.compile(r"^(\s*(?:hi|hello|hey|dear|good (?:morning|afternoon|evening))\b"
+                       r"(?:[^,\n.!?;:]|\b(?:mr|mrs|ms|dr|prof)\.){0,40}),[ \t]+(?=\S)", re.IGNORECASE)
+_EM_CLOSE = re.compile(r"^\W*(?:(?:many )?thanks(?! to\b)|thank you|(?:(?:best|kind|warm) )?regards|sincerely|cheers|"
+                       r"best(?: wishes)?(?=\W*$)|talk (?:to you )?soon|take care(?=\W*$)|"
+                       r"have a (?:good|great|nice|wonderful|lovely) "
+                       r"(?:day|weekend|week|one|night|evening|afternoon|morning|rest|holiday|trip))\b|"
+                       r"^\W*(?:best(?: wishes)?)\W*$", re.IGNORECASE)
+_EM_TAIL = re.compile(r",\s+((?:have a (?:good|great|nice|wonderful|lovely) "
+                     r"(?:day|weekend|week|one|night|evening|afternoon|morning)|talk soon|take care|cheers)"
+                     r"(?:\s+(?:everyone|all|guys|team))?)\s*[.!?]?\s*$", re.IGNORECASE)
+_EM_BOUND = re.compile(r"\s*\n\s*|(?<=[.!?])[ \t]+(?=\S)")
+
+
+def _em_sentences(t: str) -> list[tuple[int, int, bool]]:
+    """(start, end, preceded_by_newline) for each sentence/line of ``t``."""
+    out, pos, nl = [], 0, False
+    for m in _EM_BOUND.finditer(t):
+        out.append((pos, m.start(), nl))
+        pos, nl = m.end(), "\n" in m.group(0)
+    out.append((pos, len(t), nl))
+    return [x for x in out if t[x[0]:x[1]].strip()]
+
+
+def layout_email(text: str) -> str:
+    """Put a spoken greeting and a spoken closing on their own lines. Never splits mid-sentence, never adds words;
+    short replies are left on one line."""
+    t = text.strip()
+    m = _EM_GREET.match(t)
+    if m and len(m.group(1).split()) <= 4:
+        rest = t[m.end():]
+        if len(_em_sentences(rest)) >= 2 or len(rest.split()) >= 15:
+            t = m.group(1).rstrip() + ",\n\n" + (rest[:1].upper() if not rest[1:2].isupper() else rest[:1]) + rest[1:]
+    sents = _em_sentences(t)
+    for k in range(max(2, len(sents) - 2), len(sents)):
+        s0, _, nl = sents[k]
+        if not _EM_CLOSE.match(t[s0:]) or len(t[s0:].split()) > 12:
+            continue
+        if nl:
+            break                      # closing already starts on its own line
+        t = t[:s0].rstrip(" \t") + "\n\n" + t[s0:]
+        return t
+    # closing glued to the end of the last sentence after a comma ("..., have a good day.")
+    last = t.rsplit("\n", 1)[-1]
+    m = _EM_TAIL.search(last)
+    if m and len(sents) >= 2 and not last.lstrip().startswith(("-", "*")) and len(last[:m.start()].split()) >= 15 \
+            and len(re.split(r"[.!?]\s+", last[:m.start()])[-1].split()) >= 6:
+        head = last[:m.start()].rstrip()
+        tail = m.group(1) + "."
+        t = t[:len(t) - len(last)] + head + ("" if head.endswith((".", "!", "?")) else ".") + "\n\n" \
+            + tail[:1].upper() + tail[1:]
+    return t
+
+
 def apply_style_def(text: str, sd: dict, abbr: Optional[dict[str, str]] = None,
                     preserve: Optional[list[str]] = None) -> str:
     """Deterministic post-processing of a style definition. Idempotent; safe on LLM output or regex output."""
@@ -427,4 +525,6 @@ def apply_style_def(text: str, sd: dict, abbr: Optional[dict[str, str]] = None,
             w = w.strip()
             if w:
                 t = re.sub(r"(?<![\w])" + re.escape(w) + r"(?![\w])", lambda m, w=w: w, t, flags=re.IGNORECASE)
+    if sd.get("email_layout"):
+        t = layout_email(t)
     return strip_final_period(t, sd.get("strip_trailing_period"))

@@ -429,6 +429,8 @@ def _style_flags(sd: dict) -> str:
         out.append("abbreviations")
     if sd.get("drop_apostrophes"):
         out.append("no apostrophes")
+    if sd.get("email_layout"):
+        out.append("email layout")
     return ", ".join(out) or "-"
 
 

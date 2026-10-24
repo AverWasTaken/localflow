@@ -112,6 +112,37 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+# one-time config migrations: marker -> function(data) -> changed?. Markers are stored in config "migrations".
+EMAIL_RULES = ("Gmail", "Outlook", "Outlook / Office web", "Proton / Yahoo mail")
+
+
+def _migrate_email_style(data: dict) -> bool:
+    """Mail rules that still use the old default style (professional) move to the new built-in `email` style."""
+    changed = False
+    for rule in data.get("profiles") or []:
+        if isinstance(rule, dict) and rule.get("name") in EMAIL_RULES and rule.get("style") == "professional":
+            rule["style"] = "email"
+            changed = True
+    return changed
+
+
+MIGRATIONS = {"email_style_v1": _migrate_email_style}
+
+
+def apply_migrations(data: dict) -> bool:
+    """Run every migration whose marker is not yet recorded; returns True if ``data`` changed."""
+    done = data.get("migrations")
+    if not isinstance(done, list):
+        done = data["migrations"] = []
+    changed = False
+    for marker, fn in MIGRATIONS.items():
+        if marker not in done:
+            fn(data)
+            done.append(marker)
+            changed = True
+    return changed
+
+
 # top-level sections introduced after v1: written into an existing config.json the first time
 PERSISTED_KEYS = {"auto_style", "profiles", "process_groups", "styles", "abbreviations", "streaming", "game_mode"}
 
@@ -136,6 +167,7 @@ class Config:
         self._user_keys: set[str] = set()
         self.load()
         if not self.path.exists():
+            apply_migrations(self.data)   # fresh install: defaults are already current
             self.save()
         elif PERSISTED_KEYS - self._user_keys:
             # upgrade: write newly introduced sections (profiles, styles, ...) into the file so they are editable
@@ -185,6 +217,9 @@ class Config:
                     user = json.load(f)
                 self._user_keys = set(user) if isinstance(user, dict) else set()
                 self.data = deep_merge(DEFAULTS, user)
+                if apply_migrations(self.data) and isinstance(user, dict):
+                    log.info("config: applied migrations %s", self.data["migrations"])
+                    self.save()
                 return True
             except Exception:
                 log.exception("failed to read config; keeping previous values")

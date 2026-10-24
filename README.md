@@ -107,7 +107,8 @@ overlay while recording (`casual · Discord`), written to the log
 | Style | What you get | Used for (default rules) |
 |---|---|---|
 | `casual` | all lowercase, no final period, minimal punctuation, slang abbreviations for phrases you actually said (idk, nvm, tbh, rn, omw, ngl, imo, btw, omg, brb, idc, ttyl, lmk, fr), apostrophes dropped in unambiguous contractions (dont, cant, im, thats, lets) | Discord (app + web), WhatsApp, Telegram, Messenger, Signal, Instagram / X DMs tabs, Google Messages / iMessage-style web apps, Snapchat web, Reddit chat, Element, Guilded, Skype |
-| `professional` | proper capitalization and punctuation, full sentences, grammar fixed, no slang, contractions left as you said them; never adds a greeting, sign-off, name or fact you did not say | Gmail tab, Outlook (`outlook.exe`, `olk.exe`, Outlook / Office web tabs), Google Docs tab, Word, LinkedIn tabs, Proton / Yahoo mail tabs, Thunderbird |
+| `professional` | proper capitalization and punctuation, full sentences, grammar fixed, no slang, contractions left as you said them; never adds a greeting, sign-off, name or fact you did not say | Google Docs tab, Word, LinkedIn tabs |
+| `email` | `professional` plus email layout: a spoken greeting on its own line, then the body, then a spoken closing (thanks / have a good day) on its own line; short replies stay one line; never adds a greeting or sign-off you did not say. The whole dictation is cleaned in one pass (`whole_cleanup`), so the greeting and closing are handled together | Gmail tab, Outlook (`outlook.exe`, `olk.exe`, Outlook / Office web tabs), Proton / Yahoo mail tabs, Thunderbird |
 | `code` | literal wording, first letter not capitalized, no final period on a single sentence | VS Code, Cursor, Windsurf, JetBrains IDEs, Visual Studio, Sublime, Notepad++, Windows Terminal, PowerShell/pwsh, cmd, conhost, Alacritty, WezTerm, mintty |
 | `neutral` | normal cleanup (default fallback) | everything else, **Slack and Teams** (work chat) |
 
@@ -122,7 +123,7 @@ An ordered list, **first match wins**:
 "profiles": [
   {"name": "Discord",       "process": ["discord.exe"], "style": "casual"},
   {"name": "Discord (web)", "process": ["@browsers"], "title": "^\\W*(?:\\(\\d+\\)\\s*)?discord\\s*[|-]", "style": "casual"},
-  {"name": "Gmail",         "process": ["@browsers"], "title": "(?:^|[-|]\\s*)Gmail(?:\\s*[-|]|$)", "style": "professional"}
+  {"name": "Gmail",         "process": ["@browsers"], "title": "(?:^|[-|]\\s*)Gmail(?:\\s*[-|]|$)", "style": "email"}
 ]
 ```
 

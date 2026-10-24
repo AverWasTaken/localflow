@@ -210,6 +210,8 @@ class StreamSession:
         self.repl = dic.get("replacements", {}) or {}
         self.sd = styles.get_style(cfg, ctx.style)
         self.paragraphs = bool(self.sd.get("paragraphs", False)) and self.para_pause_ms > 0
+        if self.sd.get("whole_cleanup"):
+            self.incremental = False   # style needs the whole dictation in one cleanup call (e.g. email layout)
         self.abbr = cfg.get("abbreviations", styles.DEFAULT_ABBREVIATIONS)
         self.silence_rms = float(cfg.get("audio.silence_rms", 0.006))
 
