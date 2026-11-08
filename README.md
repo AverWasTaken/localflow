@@ -86,7 +86,7 @@ The task runs at logon as you, with the highest run level so LocalFlow can type 
 prompt. It restarts itself on failure. Toggle it from Settings > "Start at login". To run it by hand instead:
 `.venv\Scripts\pythonw.exe -m localflow`.
 
-To build the setup program yourself: install [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+To build the setup program yourself: install [Inno Setup 6.7 or newer](https://jrsoftware.org/isinfo.php)
 (`winget install -e --id JRSoftware.InnoSetup`), then run `powershell -ExecutionPolicy Bypass -File installer\build.ps1`.
 The result is `dist\LocalFlow-Setup-<version>.exe`. Pushing a `v<version>` tag builds it on GitHub Actions and
 attaches it to the release (`.github/workflows/release.yml`).

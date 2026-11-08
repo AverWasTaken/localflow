@@ -1,4 +1,4 @@
-# Builds dist\LocalFlow-Setup-<version>.exe with Inno Setup 6 (winget install -e --id JRSoftware.InnoSetup).
+# Builds dist\LocalFlow-Setup-<version>.exe with Inno Setup 6.7 or newer (winget install -e --id JRSoftware.InnoSetup).
 # The version comes from localflow\__init__.py unless -Version is given.
 param([string]$Version)
 
@@ -18,7 +18,7 @@ $iscc = @(
     (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
     (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
 ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-if (-not $iscc) { throw 'ISCC.exe (Inno Setup 6) not found. Install it: winget install -e --id JRSoftware.InnoSetup' }
+if (-not $iscc) { throw 'ISCC.exe (Inno Setup 6.7 or newer) not found. Install it: winget install -e --id JRSoftware.InnoSetup' }
 
 # Windows PowerShell 5.1 reads BOM-less scripts as ANSI, so the shipped scripts must be plain ASCII
 $shipped = @(Get-ChildItem -LiteralPath (Join-Path $repo 'scripts') -Filter *.ps1) +

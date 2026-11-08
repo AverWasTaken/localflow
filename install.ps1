@@ -220,6 +220,29 @@ function Install-LocalFlow {
     $env:UV_NO_PROGRESS = '1'
 
     # ------------------------------------------------------------ python env
+    # uv keeps a link (junction) python\cpython-3.12-windows-x86_64-none -> cpython-3.12.<n>-windows-x86_64-none
+    # and the venv's pyvenv.cfg points at it. Clear out what an interrupted run may have left in its place.
+    $pyLink = Join-Path $env:UV_PYTHON_INSTALL_DIR 'cpython-3.12-windows-x86_64-none'
+    $linkItem = Get-Item -LiteralPath $pyLink -Force -ErrorAction SilentlyContinue
+    if ($linkItem) {
+        if (-not ($linkItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            if (@(Get-ChildItem -LiteralPath $pyLink -Force).Count -gt 0) {
+                throw "$pyLink should be a link made by uv but is a folder with files in it. Delete that folder and run setup again."
+            }
+            Warn "Removing the empty folder $pyLink (uv makes a link there)."
+            [IO.Directory]::Delete($pyLink, $false)
+        } else {
+            $linkTarget = @($linkItem.Target)[0]
+            if ($linkTarget -and -not [IO.Path]::IsPathRooted($linkTarget)) { $linkTarget = Join-Path $env:UV_PYTHON_INSTALL_DIR $linkTarget }
+            if (-not $linkTarget -or -not [IO.Directory]::Exists($linkTarget)) {
+                Warn "Removing the broken Python link $pyLink (it points to a folder that is gone)."
+                [IO.Directory]::Delete($pyLink, $false)   # removes only the link, never what it points to
+            }
+        }
+    }
+    Step 'Installing Python 3.12 (private copy; skipped if already there)'
+    Invoke-Logged $uv @('python', 'install', '3.12') 'Installing Python 3.12'
+
     if (Test-Path $venvPy) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         & $venvPy -c 'import sys' 2>$null
@@ -231,7 +254,7 @@ function Install-LocalFlow {
         }
     }
     if (-not (Test-Path $venvPy)) {
-        Step 'Creating the Python 3.12 environment (downloads Python if needed)'
+        Step 'Creating the Python 3.12 environment'
         Invoke-Logged $uv @('venv', '--python', '3.12', (Join-Path $root '.venv')) 'Creating the Python environment'
     } else { Write-Host 'Python environment: ok' }
 

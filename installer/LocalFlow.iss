@@ -1,4 +1,4 @@
-; LocalFlow setup program (Inno Setup 6.3 or newer). Build with installer\build.ps1, which passes /DAppVersion=x.y.z.
+; LocalFlow setup program (Inno Setup 6.7 or newer). Build with installer\build.ps1, which passes /DAppVersion=x.y.z.
 ; The setup is small: it copies the LocalFlow source and then runs install.ps1, which downloads Python,
 ; the Python packages, llama.cpp and the models into the install folder.
 ; Extra setup switches (besides the standard /SILENT, /VERYSILENT, /DIR=...):
@@ -6,6 +6,10 @@
 ;   /NOTASK     don't register the "LocalFlow" startup task (no admin prompt)
 ; Setup exit code 10 = files were copied but install.ps1 failed (see install.log in the install folder).
 ; Keep this file ASCII only.
+
+#if Ver < EncodeVer(6, 7, 0)
+  #error Inno Setup 6.7 or newer is required (the RedirectionGuard directive below).
+#endif
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -40,6 +44,11 @@ RestartApplications=no
 SetupLogging=yes
 UninstallDisplayName=LocalFlow
 UsePreviousTasks=yes
+; Inno Setup 6.7 turns RedirectionGuard on by default and child processes inherit it. uv (run by install.ps1)
+; makes a junction python\cpython-3.12-windows-x86_64-none; made by a non-admin process it is "untrusted", and
+; with the guard on, uv and Python then fail with error 448 (untrusted mount point). The guard is meant for
+; setups that run elevated; this one runs as the user (PrivilegesRequired=lowest).
+RedirectionGuard=no
 
 [Messages]
 WelcomeLabel2=This will install [name/ver] on your computer.%n%nAfter copying its files, setup downloads Python, the Python packages, llama.cpp and the AI models (about 7 GB in total, or about 2.5 GB without the AI cleanup model). Keep the computer online until it finishes. A PowerShell window shows the progress.%n%nWindows asks for admin permission once, to add the startup task that lets LocalFlow type into apps running as administrator.
