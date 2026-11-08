@@ -20,23 +20,50 @@ Inspired by Wispr Flow. Not affiliated.
   a fraction of a second after you let go instead of several seconds later.
 - Custom dictionary (words and replacement rules) and snippets (say a phrase, get a block of text).
 - Uses your Windows default microphone and follows it when you change it. Optional per-device override.
-- Tray icon with pause, mic picker, history, and a Settings window.
+- Command mode: hold Ctrl+Win and say an instruction ("make this more formal", "translate to German"). With text
+  selected it rewrites the selection, otherwise it writes the answer at the cursor.
+- Paste last: Alt+Shift+Z (or tray > Paste last transcript) types your last dictation again.
+- Meetings and transcriptions: record a meeting (your mic plus the computer's audio) or transcribe an audio/video
+  file, then get a local AI summary, bullet points and action items, or ask questions about it.
+- Switch the cleanup model from the tray or Settings: any `.gguf` file you drop into the `models` folder shows up.
+- Home window with your dictation history and stats, plus a tray icon with pause, mic picker and Settings.
 - If the LLM is unavailable or produces something off, a deterministic regex cleaner takes over.
+
+## Install
+
+1. Download `LocalFlow-Setup-x.y.z.exe` from the [Releases page](https://github.com/AverWasTaken/localflow/releases).
+2. Run it. Windows SmartScreen may warn you because the installer isn't code-signed: click **More info**, then
+   **Run anyway**.
+3. Click through the setup. After copying its files it opens a PowerShell window and downloads everything LocalFlow
+   needs: Python, the Python packages, llama.cpp and the AI models (about 7 GB, or about 2.5 GB if you untick the AI
+   cleanup model). Windows asks for admin permission once, to add the startup task.
+4. When it's done, LocalFlow starts in the system tray. Hold **Ctrl+Alt** and talk.
+
+It installs into `%LOCALAPPDATA%\Programs\LocalFlow` and adds LocalFlow to the Start Menu. If something fails
+halfway (no internet, for example), the window shows the error and the full log is in `install.log` in that folder.
+Run the setup again and it continues where it stopped. Running a newer setup over an old one upgrades it.
+
+The first launch on a new GPU can take about 30 seconds while CUDA compiles its kernels (cached afterwards).
+
+**Note:** the startup task runs LocalFlow with your highest rights at login (as administrator if your Windows
+account is an administrator; a standard account stays standard), so it can type into apps that run as
+administrator. It runs the files in your user folder (`%LOCALAPPDATA%\Programs\LocalFlow`), so anything that can
+change files in your user account could change what runs elevated. If that matters to you, turn off
+Settings > "Start at login" and start LocalFlow from the Start Menu instead.
 
 ## Requirements
 
 - Windows 10 or 11, 64-bit.
-- An NVIDIA GPU with about 8 GB of VRAM or more is recommended (RTX 20-series or newer). The speech model and the
-  cleanup model both live on the GPU.
-- A recent NVIDIA driver. The bundled llama.cpp build targets CUDA 13.x, which wants driver 580 or newer.
-- [uv](https://docs.astral.sh/uv/) (it fetches Python 3.12 for you): `winget install --id=astral-sh.uv -e`
-- About 10 GB of free disk: roughly 3 GB for the Python environment, 4.3 GB for the cleanup model, 1.6 GB for the
-  speech model, 0.7 GB for llama.cpp.
-- A microphone.
+- An NVIDIA GPU with 6 GB of VRAM or more is recommended (RTX 20-series or newer). The speech model and the cleanup
+  model both live on the GPU.
+- NVIDIA driver 580 or newer (the bundled llama.cpp build uses CUDA 13). Get it from nvidia.com/drivers.
+- About 10 GB of free disk: roughly 3 GB for the Python environment, 4.5 GB for the cleanup model, 1.6 GB for the
+  speech model, 0.6 GB for llama.cpp.
+- A microphone and an internet connection during setup. After that everything runs offline.
 
-No NVIDIA GPU? It still runs, just slower. See "Running without a GPU" below.
+No NVIDIA GPU? It still runs on the CPU, slower and without the AI cleanup. See "Running without a GPU" below.
 
-## Install
+### Advanced: install from source
 
 ```powershell
 git clone https://github.com/AverWasTaken/localflow
@@ -44,14 +71,25 @@ cd localflow
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-The installer checks your system, creates a venv, installs dependencies, downloads the llama.cpp CUDA build, the
-Qwen3.5-4B Q8_0 model (from Hugging Face) and the Whisper model, then registers a Task Scheduler task called
-`LocalFlow` and starts it. It asks for admin once to register the task. First launch on a new GPU architecture can
-take about 30 seconds while CUDA compiles kernels (they are cached afterwards).
+`install.ps1` is the same script the setup program runs. It checks your system, downloads a pinned copy of
+[uv](https://docs.astral.sh/uv/) (which fetches Python 3.12 into the `python` folder), creates `.venv`, installs the
+dependencies, downloads the llama.cpp CUDA build, the Qwen3.5-4B Q8_0 model (from Hugging Face) and the Whisper
+model, then registers a Task Scheduler task called `LocalFlow` and starts it. Downloads from GitHub are checked
+against pinned SHA-256 hashes. Re-running it repairs a broken install. Flags: `-SkipModel` (no cleanup model),
+`-NoTask` (no startup task, no admin prompt), `-NoStart` (don't launch at the end). Everything is logged to
+`install.log`.
+
+There is one `LocalFlow` startup task per computer (the task name is shared by all Windows users). If it already runs
+another copy of LocalFlow, the scripts leave it alone and tell you; use `scripts\register-task.ps1 -Force` to point it at this copy.
 
 The task runs at logon as you, with the highest run level so LocalFlow can type into elevated windows without a UAC
 prompt. It restarts itself on failure. Toggle it from Settings > "Start at login". To run it by hand instead:
 `.venv\Scripts\pythonw.exe -m localflow`.
+
+To build the setup program yourself: install [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+(`winget install -e --id JRSoftware.InnoSetup`), then run `powershell -ExecutionPolicy Bypass -File installer\build.ps1`.
+The result is `dist\LocalFlow-Setup-<version>.exe`. Pushing a `v<version>` tag builds it on GitHub Actions and
+attaches it to the release (`.github/workflows/release.yml`).
 
 ### Running without a GPU
 
@@ -245,9 +283,11 @@ localflow/           package: hotkey.py (WH_KEYBOARD_LL hook), audio.py (+ devwa
                      settings_ui.py, history_ui.py, app.py (tray + wiring), autostart.py, config.py,
                      winutil.py (foreground window / process detection),
                      gamemode.py (game process watcher)
-bin/llama/           llama.cpp b11381 CUDA 13.4 build (llama-server.exe), downloaded by install.ps1
+bin/llama/           llama.cpp b12211 CUDA 13.5 build (llama-server.exe), downloaded by install.ps1
+bin/uv/              pinned uv, downloaded by install.ps1; python/ holds the Python it installs
 models/              Qwen3.5-4B-Q8_0.gguf, downloaded by install.ps1
-scripts/register-task.ps1
+scripts/             register-task.ps1 (startup task), stop.ps1, launch.pyw (Start Menu entry), lfcommon.ps1
+installer/           LocalFlow.iss (Inno Setup script) and build.ps1 -> dist/LocalFlow-Setup-<version>.exe
 tests/               test_unit_*.py (offline), test_cleanup.py, test_e2e.py, bench_streaming.py, gen_bench_corpus.py,
                      test_hotkey_integration.py (drives real keys!), gen_speech.ps1
 ```
@@ -287,12 +327,19 @@ Pasting goes through the clipboard; the previous clipboard contents are restored
 
 ## Uninstall
 
+Installed with the setup program: Windows Settings > Apps > Installed apps > LocalFlow > Uninstall (or Start Menu >
+LocalFlow > Uninstall LocalFlow). It stops LocalFlow, removes its startup task and deletes the program, Python,
+llama.cpp and the cleanup model. It then asks whether to also delete your settings, history, meeting transcripts
+and recordings (`%APPDATA%\LocalFlow`) and the downloaded speech models.
+
+Installed from source:
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File uninstall.ps1          # remove the task and stop LocalFlow
-powershell -ExecutionPolicy Bypass -File uninstall.ps1 -Purge   # also delete the venv, models, bin and %APPDATA%\LocalFlow
+powershell -ExecutionPolicy Bypass -File uninstall.ps1          # stop this copy and remove its startup task
+powershell -ExecutionPolicy Bypass -File uninstall.ps1 -Purge   # also delete .venv, models, bin, python and %APPDATA%\LocalFlow
 ```
 
-Then delete the folder.
+Then delete the folder. Both only touch the copy they belong to; another LocalFlow copy and its task are left alone.
 
 ## Tests
 

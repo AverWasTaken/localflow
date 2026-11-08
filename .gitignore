@@ -9,3 +9,4 @@ tests/*.png
 *.log
 tests/bench_audio/
 tests/bench_out/
+dist/

@@ -1,0 +1,60 @@
+name: Release installer
+
+# Builds dist\LocalFlow-Setup-<version>.exe and attaches it to the GitHub Release for the tag.
+# Push a tag like v1.0.0 (it must match __version__ in localflow/__init__.py), or run it by hand
+# with the tag name.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach the installer to (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          # windows-latest usually has Inno Setup 6 preinstalled; install a pinned 6.x only if it is missing
+          if (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") { "Inno Setup 6 already installed"; exit 0 }
+          choco install innosetup --version 6.7.1 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed ($LASTEXITCODE)" }
+
+      - name: Check the tag matches __version__
+        shell: pwsh
+        run: |
+          $init = Get-Content localflow/__init__.py -Raw
+          if ($init -notmatch '__version__\s*=\s*"([^"]+)"') { throw 'no __version__ in localflow/__init__.py' }
+          $ver = $Matches[1]
+          if ($env:TAG -ne "v$ver") { throw "tag $env:TAG does not match __version__ $ver" }
+          "VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build installer
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1 -Version $env:VERSION
+
+      - name: Upload to the GitHub Release
+        shell: pwsh
+        run: |
+          $exe = "dist/LocalFlow-Setup-$env:VERSION.exe"
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG $exe --title "LocalFlow $env:VERSION" --generate-notes
+          } else {
+            gh release upload $env:TAG $exe --clobber
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed ($LASTEXITCODE)" }
