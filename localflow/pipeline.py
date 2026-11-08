@@ -116,6 +116,11 @@ class Pipeline:
         restore_wait = int(cfg.get("insert.restore_delay_ms", 300)) if (insert and cfg.get("insert.mode") == "paste"
                                                                         and cfg.get("insert.restore_clipboard")) else 0
         r["total_ms"] = int((time.perf_counter() - t_release) * 1000) - restore_wait
+        if insert and r["status"] == "ok" and self.history is not None:
+            try:    # usage stats count every successful insert, whatever the history settings are
+                self.history.record_stats(words=len(text.split()), audio_s=dur, kind="dictation")
+            except Exception:
+                log.exception("stats write failed")
         if self.history is not None and cfg.get("history.enabled", True):
             try:
                 self.history.add(raw, text, app_exe, dur, r["stt_ms"], r["cleanup_ms"], r["total_ms"],

@@ -19,7 +19,14 @@ from .paths import CONFIG_PATH
 log = logging.getLogger(__name__)
 
 # keys whose dict values are user maps: replaced wholesale on update, not merged
-_MAP_KEYS = ("replacements", "snippets", "abbreviations", "process_groups")
+_MAP_KEYS = ("replacements", "snippets", "abbreviations", "process_groups", "model_args", "model_request")
+
+# LFM3 is a reasoning model whose "thinking off" mode is not reliable: after the answer it often keeps going
+# ("Let me clean this up...", "Wait, ...", "</think>"). Stopping at those markers keeps just the answer.
+LFM3_STOPS = ["</think>", "<think>", "\n\nLet me", "\n\nLet's", "\n\nWait", "\nWait,", "\nBut wait",
+              "\n\nNote:", "\n\nActually", "\n\nHmm", "\n\nOkay,", "\n\nThe transcript", "\n\nI need",
+              "\n\nI should", "\n\n(", " (Note", "(Note:", " Wait —", " Wait, let me", " Wait, the transcript",
+              "Let me re-read", "Let me parse", " Hmm."]
 
 DEFAULTS: dict[str, Any] = {
     # Hold these modifiers together to dictate. Any of: ctrl, alt, shift, win
@@ -27,6 +34,27 @@ DEFAULTS: dict[str, Any] = {
     # While holding the hotkey, tap this key to lock hands-free recording on
     "handsfree_key": "space",
     "enabled": True,  # False == paused
+    # Command mode: hold this combo and speak an instruction ("make this more formal", "translate to German").
+    # With text selected it rewrites the selection, otherwise it writes the answer at the cursor. Must not overlap
+    # the dictation hotkey (one may not be a subset of the other) or command mode stays off.
+    "command_mode": {
+        "enabled": True,
+        "hotkey": "ctrl+win",
+        "max_duration_s": 60,
+        "timeout_s": 30.0,           # LLM request timeout
+        "capture_timeout_ms": 600,   # how long to wait for the app to answer Ctrl+C
+        "max_tokens_generate": 768,  # output budget when there is no selection
+        # never send Ctrl+C here (terminals: Ctrl+C = interrupt; editors copy the whole line with no selection):
+        # these apps are generate-only (the answer is inserted at the cursor)
+        "no_capture_apps": ["windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+                            "openconsole.exe", "wezterm-gui.exe", "alacritty.exe", "mintty.exe", "kitty.exe",
+                            "hyper.exe", "tabby.exe", "warp.exe", "putty.exe", "code.exe", "code - insiders.exe",
+                            "cursor.exe", "windsurf.exe", "zed.exe", "sublime_text.exe", "idea64.exe",
+                            "pycharm64.exe", "webstorm64.exe", "clion64.exe", "rider64.exe", "goland64.exe",
+                            "phpstorm64.exe", "rubymine64.exe", "datagrip64.exe", "studio64.exe", "fleet.exe"],
+    },
+    # Re-insert the last dictated / command text at the cursor (tray: "Paste last transcript")
+    "paste_last": {"enabled": True, "hotkey": "alt+shift+z"},
     "mic": {
         # Both empty = follow the Windows default recording device (Sound settings), switching live when it changes.
         "match": "",         # optional: case-insensitive substring of an input device name to prefer over the default
@@ -59,6 +87,10 @@ DEFAULTS: dict[str, Any] = {
         "ctx": 8192,
         "timeout_s": 5.0,
         "max_len_ratio": 1.6,        # sanity guard on output/input length
+        # Per-model extras, keyed by the model's file name (tray / Settings switch models live):
+        # model_args: extra llama-server command-line args; model_request: extra fields for each chat request.
+        "model_args": {},
+        "model_request": {"LFM3-1.7B-Q8_0.gguf": {"stop": LFM3_STOPS}},
     },
     "insert": {
         "mode": "paste",             # "paste" (clipboard + Ctrl+V) or "type" (SendInput unicode)
@@ -99,7 +131,8 @@ DEFAULTS: dict[str, Any] = {
         "replacements": {},     # {"heard": "wanted"} applied after transcription (whole words, case-insens.)
     },
     "snippets": {},             # {"spoken trigger": "expansion text"}
-    "history": {"enabled": True, "max_entries": 5000},
+    "history": {"enabled": True, "max_entries": 5000,
+                "retention_days": 0},       # delete history older than this many days (0 = keep forever)
     # Free the GPU while a game runs: unload the speech + cleanup models, reload when the game has been gone a while.
     # while_active: "off" = dictation paused, "cpu" = dictation on a small CPU model with regex cleanup (no LLM)
     "game_mode": {
@@ -109,6 +142,18 @@ DEFAULTS: dict[str, Any] = {
         "exit_grace_s": 10,
         "while_active": "off",
     },
+    # Meeting recorder: your mic ("You") + what an output device plays ("Others"), transcribed after you stop.
+    # mic / output_device: device names, "" = the dictation mic / the Windows default output.
+    # style: "raw" or a style name (AI cleanup per speaker turn). echo_similarity: a "You" line this similar to
+    # an overlapping "Others" line is speaker echo (hidden in the transcript, kept in the data).
+    "meetings": {"mic": "", "output_device": "", "style": "raw", "max_hours": 4, "min_free_gb": 1.0,
+                 "echo_similarity": 0.75},
+    # Audio-file transcription. file_style: default style ("raw" = no AI cleanup); language: "" = stt.language.
+    # auto_resume: jobs interrupted by quitting continue on the next start (they pause during game mode).
+    "transcripts": {"file_style": "raw", "language": "", "max_file_hours": 4, "auto_resume": True},
+    # AI notes on transcripts (summary / bullets / key points / action items / custom). wait_ready_s: longest wait
+    # for the AI model to come up, for notes and for transcript cleanup (then basic cleanup is used).
+    "assistant": {"max_tokens": 1024, "note_tokens": 600, "temperature": 0.3, "wait_ready_s": 900},
 }
 
 
@@ -126,7 +171,63 @@ def _migrate_email_style(data: dict) -> bool:
     return changed
 
 
-MIGRATIONS = {"email_style_v1": _migrate_email_style}
+# the casual prompt shipped before the quote / backtick / paragraph rules (Config.save froze it into config.json)
+OLD_CASUAL_PROMPT = (
+    "Casual texting style, the way a person types fast in a chat app. All lowercase (including \"i\"). "
+    "No period at the end and none between short sentences; keep ? or ! only when they matter. "
+    "Minimal punctuation: a comma only where a sentence would be confusing without it. "
+    "Drop apostrophes in common contractions (dont, cant, im, thats, lets, ive). "
+    "Use texting abbreviations ONLY for phrases the speaker actually said: idk, nvm, tbh, rn, omw, ngl, "
+    "imo, btw, omg, brb, idc, ttyl, lmk, fr. Still remove filler sounds (um, uh, er, hmm, \"you know\"). "
+    "Do not polish the grammar, and do not shorten single words (write \"you\", not \"u\"). "
+    "Never add slang, emoji or words that were not said.")
+
+
+def _migrate_casual_format(data: dict) -> bool:
+    """An unedited copy of the old casual prompt gets the new one (quotes, backticks, paragraphs). Edited prompts stay."""
+    casual = (data.get("styles") or {}).get("casual")
+    if isinstance(casual, dict) and casual.get("prompt") == OLD_CASUAL_PROMPT:
+        casual["prompt"] = _styles.DEFAULT_STYLES["casual"]["prompt"]
+        return True
+    return False
+
+
+# the casual prompt shipped with casual_format_v1 (quotes / backticks / paragraphs), before the spoken-code and
+# self-correction rules
+CASUAL_PROMPT_V1 = (
+    "Casual texting style, the way a person types fast in a chat app. All lowercase (including \"i\"). "
+    "No period at the end and none between short sentences; keep ? or ! only when they matter. "
+    "Minimal punctuation: a comma only where a sentence would be confusing without it. "
+    "Drop apostrophes in common contractions (dont, cant, im, thats, lets, ive). "
+    "Use texting abbreviations ONLY for phrases the speaker actually said: idk, nvm, tbh, rn, omw, ngl, "
+    "imo, btw, omg, brb, idc, ttyl, lmk, fr. Still remove filler sounds (um, uh, er, hmm, \"you know\"). "
+    "Do not polish the grammar, and do not shorten single words (write \"you\", not \"u\"). "
+    "Never add slang, emoji or words that were not said. "
+    "FORMATTING, only around words that were said: when the speaker repeats someone's exact words "
+    "(after tell it, tell him the problem, i told him, i said, she asked, he was like), put those exact "
+    "words in double quotes; reported speech with \"that\" stays plain (tell him that its down), a "
+    "description of how someone felt or acted is not a quote (he was like super confused), and "
+    "\"like\" as filler or comparison never starts a quote. Wrap every command, file name with an "
+    "extension (main.py, notes.txt), file path and code name in backticks, keeping their exact "
+    "spelling; never backtick links or names of programs, products, languages, sites or people "
+    "(linux, discord, python, ai, chatgpt). "
+    "In a long message with several separate points, start a new paragraph (blank line) only where the "
+    "topic changes; keep the sentences of one point together, usually 3 or more per paragraph, never "
+    "one paragraph per sentence.")
+
+
+def _migrate_casual_code(data: dict) -> bool:
+    """An unedited copy of the v1 casual prompt gets the current one (spoken code, self-corrections). Edited prompts
+    stay. (casual_format_v1 already writes the current default, so an old prompt chains straight through.)"""
+    casual = (data.get("styles") or {}).get("casual")
+    if isinstance(casual, dict) and casual.get("prompt") == CASUAL_PROMPT_V1:
+        casual["prompt"] = _styles.DEFAULT_STYLES["casual"]["prompt"]
+        return True
+    return False
+
+
+MIGRATIONS = {"email_style_v1": _migrate_email_style, "casual_format_v1": _migrate_casual_format,
+              "casual_format_v2": _migrate_casual_code}
 
 
 def apply_migrations(data: dict) -> bool:
@@ -144,7 +245,8 @@ def apply_migrations(data: dict) -> bool:
 
 
 # top-level sections introduced after v1: written into an existing config.json the first time
-PERSISTED_KEYS = {"auto_style", "profiles", "process_groups", "styles", "abbreviations", "streaming", "game_mode"}
+PERSISTED_KEYS = {"auto_style", "profiles", "process_groups", "styles", "abbreviations", "streaming", "game_mode",
+                  "command_mode", "paste_last", "meetings", "transcripts", "assistant"}
 
 
 def deep_merge(base: dict, over: dict) -> dict:

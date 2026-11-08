@@ -1,4 +1,5 @@
-"""Settings window + the shared dark theme (DARK_QSS) used by the other LocalFlow windows."""
+"""The LocalFlow window: Home, Transcriptions and the settings pages (General, Dictionary, Snippets, Styles,
+About). The theme lives in theme.py and is re-exported here for older imports."""
 from __future__ import annotations
 
 import copy
@@ -8,334 +9,24 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen
-from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QComboBox,
-                               QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
-                               QSlider, QSpinBox, QStackedWidget, QStyleFactory, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+                               QPlainTextEdit, QSlider, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from . import __version__
 from . import styles as _styles
+from .cleanup import list_models, model_display_name, same_model
 from .paths import CONFIG_PATH, LOG_PATH
 
-# ---------------------------------------------------------------- theme
-ACCENT = "#8b7cff"
-ACCENT_HOVER = "#a094ff"
-ACCENT_PRESSED = "#7666f2"
-BG = "#131317"
-SIDEBAR = "#18181d"
-SURFACE = "#1e1e25"
-SURFACE2 = "#272730"
-BORDER = "#31313c"
-TEXT = "#ececf2"
-MUTED = "#9494a3"
-DANGER = "#ff6b6b"
-
-
-def _make_icons() -> dict[str, str]:
-    """Render the few glyphs QSS needs (check mark, arrows) to PNGs; returns name -> forward-slash path."""
-    d = Path(tempfile.gettempdir()) / "localflow_ui_icons"
-    d.mkdir(parents=True, exist_ok=True)
-    out: dict[str, str] = {}
-
-    def draw(name: str, painter_fn, size: int = 16):
-        img = QImage(size * 2, size * 2, QImage.Format_ARGB32)
-        img.fill(Qt.transparent)
-        p = QPainter(img)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.scale(2, 2)
-        painter_fn(p, size)
-        p.end()
-        f = d / f"{name}.png"
-        img.save(str(f))
-        out[name] = f.as_posix()
-
-    def check(p, s):
-        p.setPen(QPen(QColor("white"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.drawPolyline([QPointF(s * .25, s * .52), QPointF(s * .43, s * .70), QPointF(s * .76, s * .32)])
-
-    def arrow(up: bool):
-        def f(p, s):
-            p.setPen(QPen(QColor(MUTED), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            y0, y1 = (s * .62, s * .38) if up else (s * .38, s * .62)
-            p.drawPolyline([QPointF(s * .30, y0), QPointF(s * .5, y1), QPointF(s * .70, y0)])
-        return f
-
-    try:
-        draw("check", check)
-        draw("down", arrow(False))
-        draw("up", arrow(True))
-    except Exception:
-        pass
-    return out
-
-
-_I = _make_icons()
-
-
-def _url(name: str) -> str:
-    return f"url({_I[name]})" if name in _I else "none"
-
-
-DARK_QSS = f"""
-* {{ font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif; font-size: 13px; color: {TEXT}; }}
-QWidget {{ background: transparent; }}
-QWidget#root, QScrollArea, QScrollArea > QWidget > QWidget {{ background: {BG}; }}
-QWidget#sidebarBox {{ background: {SIDEBAR}; border-right: 1px solid {BORDER}; }}
-QWidget#bottomBar {{ background: {SIDEBAR}; border-top: 1px solid {BORDER}; }}
-QToolTip {{ background: {SURFACE2}; color: {TEXT}; border: 1px solid {BORDER}; padding: 4px 6px; }}
-
-QLabel {{ background: transparent; }}
-QLabel#pageTitle {{ font-size: 22px; font-weight: 600; }}
-QLabel#pageSub, QLabel[role="muted"] {{ color: {MUTED}; }}
-QLabel#brand {{ font-size: 16px; font-weight: 700; letter-spacing: 0.3px; }}
-QLabel#cardTitle {{ font-size: 11px; font-weight: 600; color: {MUTED}; letter-spacing: 1px; }}
-QLabel#rowTitle {{ font-weight: 500; }}
-QLabel#rowDesc {{ color: {MUTED}; font-size: 12px; }}
-QLabel#saved {{ color: #6ee7a8; font-weight: 600; }}
-QLabel#savedErr {{ color: {DANGER}; font-weight: 600; }}
-QLabel#chip {{ background: {SURFACE2}; color: {MUTED}; border-radius: 9px; padding: 2px 9px; font-size: 11px; }}
-QLabel#chipAccent {{ background: rgba(139,124,255,0.16); color: {ACCENT_HOVER}; border-radius: 9px;
-                    padding: 2px 9px; font-size: 11px; font-weight: 600; }}
-
-QFrame#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px; }}
-QFrame#sep {{ background: {BORDER}; border: none; max-height: 1px; min-height: 1px; }}
-
-QListWidget#sidebar {{ background: transparent; border: none; outline: none; padding: 4px 10px; }}
-QListWidget#sidebar::item {{ height: 38px; padding-left: 12px; border-radius: 9px; color: {MUTED};
-                            margin: 1px 0; }}
-QListWidget#sidebar::item:hover {{ background: {SURFACE}; color: {TEXT}; }}
-QListWidget#sidebar::item:selected {{ background: rgba(139,124,255,0.18); color: {ACCENT_HOVER}; }}
-
-QPushButton {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 8px; padding: 7px 16px;
-              color: {TEXT}; }}
-QPushButton:hover {{ background: #30303b; border-color: #41414f; }}
-QPushButton:pressed {{ background: #22222a; }}
-QPushButton:disabled {{ color: #66667a; }}
-QPushButton[role="primary"] {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: #12101f; font-weight: 600; }}
-QPushButton[role="primary"]:hover {{ background: {ACCENT_HOVER}; border-color: {ACCENT_HOVER}; }}
-QPushButton[role="primary"]:pressed {{ background: {ACCENT_PRESSED}; }}
-QPushButton[role="danger"] {{ color: {DANGER}; }}
-QPushButton[role="danger"]:hover {{ background: rgba(255,107,107,0.14); border-color: rgba(255,107,107,0.5); }}
-QPushButton[role="ghost"] {{ background: transparent; border: 1px solid transparent; color: {MUTED}; padding: 4px 8px; }}
-QPushButton[role="ghost"]:hover {{ background: rgba(255,107,107,0.16); color: {DANGER}; }}
-QPushButton[role="mini"] {{ background: {SURFACE2}; border: 1px solid {BORDER}; padding: 4px 11px; font-size: 12px; }}
-
-QLineEdit, QPlainTextEdit, QSpinBox {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px;
-    padding: 6px 10px; selection-background-color: {ACCENT}; selection-color: #12101f; }}
-QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border-color: {ACCENT}; }}
-QLineEdit:read-only {{ color: {MUTED}; background: {SURFACE}; }}
-QPlainTextEdit {{ padding: 8px 10px; }}
-
-QSpinBox {{ padding-right: 24px; }}
-QSpinBox::up-button, QSpinBox::down-button {{ subcontrol-origin: border; width: 20px; border: none; background: transparent; }}
-QSpinBox::up-button {{ subcontrol-position: top right; margin: 3px 3px 0 0; }}
-QSpinBox::down-button {{ subcontrol-position: bottom right; margin: 0 3px 3px 0; }}
-QSpinBox::up-arrow {{ image: {_url("up")}; width: 12px; height: 12px; }}
-QSpinBox::down-arrow {{ image: {_url("down")}; width: 12px; height: 12px; }}
-
-QComboBox {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 8px; padding: 6px 30px 6px 11px;
-            min-height: 20px; }}
-QComboBox:hover {{ border-color: #46465a; }}
-QComboBox:focus, QComboBox:on {{ border-color: {ACCENT}; }}
-QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right; width: 26px; border: none; }}
-QComboBox::down-arrow {{ image: {_url("down")}; width: 14px; height: 14px; }}
-QComboBox QAbstractItemView {{ background: {SURFACE2}; border: 1px solid #41414f; border-radius: 8px; padding: 4px;
-    outline: none; selection-background-color: rgba(139,124,255,0.28); selection-color: {TEXT}; }}
-QComboBox QAbstractItemView::item {{ min-height: 26px; padding-left: 8px; border-radius: 5px; }}
-
-QCheckBox {{ spacing: 8px; background: transparent; }}
-QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid #4a4a5c; background: {BG}; }}
-QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
-QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: {_url("check")}; }}
-
-QSlider::groove:horizontal {{ height: 4px; background: #34343f; border-radius: 2px; }}
-QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
-QSlider::handle:horizontal {{ background: white; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }}
-QSlider::handle:horizontal:hover {{ background: #e6e2ff; }}
-
-QListWidget#plain, QTableWidget {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px; outline: none;
-    gridline-color: transparent; selection-background-color: rgba(139,124,255,0.22); selection-color: {TEXT}; }}
-QListWidget#plain::item {{ padding: 6px 10px; border-radius: 5px; }}
-QListWidget#plain::item:selected {{ background: rgba(139,124,255,0.22); }}
-QTableWidget::item {{ padding: 4px 8px; border-bottom: 1px solid #23232b; }}
-QTableWidget::item:selected {{ background: rgba(139,124,255,0.22); color: {TEXT}; }}
-QTableWidget QLineEdit {{ border-radius: 4px; padding: 2px 6px; }}
-QHeaderView {{ background: transparent; }}
-QHeaderView::section {{ background: {SURFACE}; color: {MUTED}; border: none; border-bottom: 1px solid {BORDER};
-    padding: 7px 10px; font-size: 12px; font-weight: 600; }}
-QTableCornerButton::section {{ background: {SURFACE}; border: none; }}
-
-QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #3b3b48; border-radius: 4px; min-height: 36px; margin: 0 2px; }}
-QScrollBar::handle:vertical:hover {{ background: #50505f; }}
-QScrollBar:horizontal {{ background: transparent; height: 12px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: #3b3b48; border-radius: 4px; min-width: 36px; margin: 2px 0; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
-QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-
-QMessageBox, QDialog {{ background: {SURFACE}; }}
-QMessageBox QLabel {{ color: {TEXT}; }}
-"""
-
-
-def _dark_palette() -> QPalette:
-    p = QPalette()
-    p.setColor(QPalette.Window, QColor(BG))
-    p.setColor(QPalette.WindowText, QColor(TEXT))
-    p.setColor(QPalette.Base, QColor(BG))
-    p.setColor(QPalette.AlternateBase, QColor(SURFACE))
-    p.setColor(QPalette.Text, QColor(TEXT))
-    p.setColor(QPalette.Button, QColor(SURFACE2))
-    p.setColor(QPalette.ButtonText, QColor(TEXT))
-    p.setColor(QPalette.Highlight, QColor(ACCENT))
-    p.setColor(QPalette.HighlightedText, QColor("#12101f"))
-    p.setColor(QPalette.ToolTipBase, QColor(SURFACE2))
-    p.setColor(QPalette.ToolTipText, QColor(TEXT))
-    p.setColor(QPalette.PlaceholderText, QColor(MUTED))
-    return p
-
-
-def apply_theme(app: QApplication) -> None:
-    """Fusion style + dark palette + DARK_QSS for the whole app (message boxes, menus, ...)."""
-    app.setStyle(QStyleFactory.create("Fusion"))
-    app.setPalette(_dark_palette())
-    app.setStyleSheet(DARK_QSS)
-
-
-def style_window(w: QWidget) -> None:
-    """Make a top-level window look right even if apply_theme() was never called."""
-    w.setObjectName("root")
-    w.setAttribute(Qt.WA_StyledBackground, True)
-    w.setStyle(QStyleFactory.create("Fusion"))
-    w.setPalette(_dark_palette())
-    w.setStyleSheet(DARK_QSS)
-
-
-def enable_dark_titlebar(w: QWidget) -> None:
-    """Ask DWM for an immersive dark title bar (Win10 1809+/Win11)."""
-    try:
-        import ctypes
-        hwnd = int(w.winId())
-        val = ctypes.c_int(1)
-        for attr in (20, 19):
-            if ctypes.windll.dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), attr, ctypes.byref(val), 4) == 0:
-                break
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------- small widgets
-class Switch(QAbstractButton):
-    """iOS-style toggle (checkable button)."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setCheckable(True)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(40, 22)
-        self.setFocusPolicy(Qt.StrongFocus)
-
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        on = self.isChecked()
-        track = QColor(ACCENT) if on else QColor("#3c3c48")
-        if not self.isEnabled():
-            track.setAlpha(110)
-        p.setPen(Qt.NoPen)
-        p.setBrush(track)
-        p.drawRoundedRect(QRectF(0.5, 1, 39, 20), 10, 10)
-        p.setBrush(QColor("white") if self.isEnabled() else QColor(200, 200, 205))
-        x = 29.0 if on else 11.0
-        p.drawEllipse(QPointF(x, 11), 7.5, 7.5)
-        if self.hasFocus():
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor(ACCENT_HOVER), 1.2))
-            p.drawRoundedRect(QRectF(-0.5, 0, 41, 22), 11, 11)
-
-
-class Card(QFrame):
-    """Rounded group box made of rows: [title + description] ........ [control]."""
-
-    def __init__(self, title: str = ""):
-        super().__init__()
-        self.setObjectName("card")
-        self._lay = QVBoxLayout(self)
-        self._lay.setContentsMargins(20, 16, 20, 8)
-        self._lay.setSpacing(0)
-        self._n = 0
-        if title:
-            t = QLabel(title.upper())
-            t.setObjectName("cardTitle")
-            self._lay.addWidget(t)
-            self._lay.addSpacing(6)
-
-    def add_row(self, title: str, desc: str = "", control: QWidget | None = None, stack: bool = False):
-        if self._n:
-            sep = QFrame()
-            sep.setObjectName("sep")
-            sep.setFrameShape(QFrame.NoFrame)
-            self._lay.addWidget(sep)
-        self._n += 1
-        row = QWidget()
-        outer = QVBoxLayout(row) if stack else QHBoxLayout(row)
-        outer.setContentsMargins(0, 12, 0, 12)
-        outer.setSpacing(10 if stack else 20)
-        txt = QVBoxLayout()
-        txt.setSpacing(2)
-        tl = QLabel(title)
-        tl.setObjectName("rowTitle")
-        txt.addWidget(tl)
-        if desc:
-            dl = QLabel(desc)
-            dl.setObjectName("rowDesc")
-            dl.setWordWrap(True)
-            txt.addWidget(dl)
-        if stack:
-            outer.addLayout(txt)
-            if control is not None:
-                outer.addWidget(control)
-        else:
-            outer.addLayout(txt, 1)
-            if control is not None:
-                outer.addWidget(control, 0, Qt.AlignVCenter | Qt.AlignRight)
-        self._lay.addWidget(row)
-        return row
-
-    def add_widget(self, w: QWidget):
-        if self._n:
-            sep = QFrame()
-            sep.setObjectName("sep")
-            self._lay.addWidget(sep)
-        self._n += 1
-        self._lay.addWidget(w)
-
-
-def _page(title: str, subtitle: str = "") -> tuple[QScrollArea, QVBoxLayout]:
-    """A scrollable page; returns (scroll area to put in the stack, vbox to fill)."""
-    inner = QWidget()
-    inner.setObjectName("pageInner")
-    lay = QVBoxLayout(inner)
-    lay.setContentsMargins(34, 28, 34, 28)
-    lay.setSpacing(16)
-    h = QLabel(title)
-    h.setObjectName("pageTitle")
-    lay.addWidget(h)
-    if subtitle:
-        s = QLabel(subtitle)
-        s.setObjectName("pageSub")
-        s.setWordWrap(True)
-        lay.addWidget(s)
-        lay.addSpacing(2)
-    sa = QScrollArea()
-    sa.setWidgetResizable(True)
-    sa.setFrameShape(QFrame.NoFrame)
-    sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    sa.setWidget(inner)
-    return sa, lay
+# ---------------------------------------------------------------- theme (lives in theme.py; re-exported here)
+from .theme import (ACCENT, ACCENT_HOVER, ACCENT_PRESSED, ACCENT_TEXT, BG, BORDER, DANGER, DARK_QSS,  # noqa: F401,E402
+                    MUTED, SIDEBAR, SURFACE, SURFACE2, TEXT, TEXT2, TEXT3, Card, Switch, _dark_palette, _url,
+                    apply_theme, enable_dark_titlebar, label as _label, style_window)
+from .theme import btn as _btn, page as _page  # noqa: E402
+from .uifmt import (RETENTION_CHOICES, command_combo_error, fmt_chord, parse_mods)  # noqa: E402
 
 
 def _combo(width: int = 250) -> QComboBox:
@@ -343,16 +34,6 @@ def _combo(width: int = 250) -> QComboBox:
     c.setFixedWidth(width)
     c.setMaxVisibleItems(14)
     return c
-
-
-def _btn(text: str, role: str = "", w: int | None = None) -> QPushButton:
-    b = QPushButton(text)
-    b.setCursor(Qt.PointingHandCursor)
-    if role:
-        b.setProperty("role", role)
-    if w:
-        b.setFixedWidth(w)
-    return b
 
 
 def _set_combo_data(combo: QComboBox, data, fallback_label: str | None = None) -> None:
@@ -435,15 +116,31 @@ def _style_flags(sd: dict) -> str:
 
 
 # ---------------------------------------------------------------- settings window
+PAGES = ("home", "transcriptions", "general", "dictionary", "snippets", "styles", "about")
+
+
+def transcript_style_names(cfg) -> list[str]:
+    """Style choices for transcripts ("raw" = no AI cleanup first), same rule as LocalFlowApp.transcript_styles."""
+    try:
+        names = list((cfg.get("styles", {}) or {}).keys()) or list(_styles.DEFAULT_STYLES)
+    except Exception:
+        names = list(_styles.DEFAULT_STYLES)
+    return ["raw"] + [n for n in names if n != "raw"]
+
+
 class SettingsWindow(QWidget):
     def __init__(self, config, get_mics: Callable[[], list], autostart_get: Callable[[], bool],
                  autostart_set: Callable[[bool], None],
                  get_last_ctx: Callable[[], tuple[str, str]] | None = None,
-                 get_default_mic: Callable[[], str] | None = None):
+                 get_default_mic: Callable[[], str] | None = None, app=None,
+                 get_devices: Callable[[], dict] | None = None):
         """``get_last_ctx`` returns ``(exe, title)`` of the last dictated window (for the Styles page's
-        "Add rule for last used app" button); None / empty disables the button."""
+        "Add rule for last used app" button); None / empty disables the button. ``app`` (LocalFlowApp) powers the
+        Home and Transcriptions pages; without it they show an "unavailable" state. ``get_devices`` returns
+        recorder.list_devices() for the meeting device pickers (default: that function when ``app`` is given)."""
         super().__init__()
         self.config = config
+        self.app = app
         self._get_last_ctx = get_last_ctx
         self._rules: list[dict] = []          # Styles page model: original rule dicts, edited in place
         self._rules_loading = False
@@ -451,10 +148,16 @@ class SettingsWindow(QWidget):
         self._get_default_mic = get_default_mic
         self._autostart_get = autostart_get
         self._autostart_set = autostart_set
-        self.setWindowTitle("LocalFlow Settings")
-        self.resize(900, 660)
-        self.setMinimumSize(780, 520)
+        if get_devices is None and app is not None:
+            def get_devices():
+                from .recorder import list_devices
+                return list_devices()
+        self._get_devices = get_devices
+        self.setWindowTitle("LocalFlow")
+        self.resize(1100, 740)
+        self.setMinimumSize(900, 600)
         style_window(self)
+        self.setFocusPolicy(Qt.ClickFocus)    # so opening the window doesn't drop the caret into a search box
         self._built_dark_titlebar = False
         self._snip_loading = False
 
@@ -468,38 +171,56 @@ class SettingsWindow(QWidget):
         # sidebar
         sb = QWidget()
         sb.setObjectName("sidebarBox")
-        sb.setFixedWidth(210)
+        sb.setAttribute(Qt.WA_StyledBackground, True)
+        sb.setFixedWidth(200)
         sbl = QVBoxLayout(sb)
-        sbl.setContentsMargins(0, 22, 0, 14)
-        sbl.setSpacing(8)
-        brand = QLabel("  LocalFlow")
+        sbl.setContentsMargins(0, 20, 0, 14)
+        sbl.setSpacing(10)
+        brand = QLabel("LocalFlow")
         brand.setObjectName("brand")
-        brand.setContentsMargins(20, 0, 0, 10)
+        brand.setContentsMargins(24, 0, 0, 8)
         sbl.addWidget(brand)
         self.nav = QListWidget()
         self.nav.setObjectName("sidebar")
         self.nav.setFocusPolicy(Qt.NoFocus)
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         sbl.addWidget(self.nav, 1)
         ver = QLabel(f"v{__version__}")
-        ver.setProperty("role", "muted")
+        ver.setProperty("role", "faint")
         ver.setContentsMargins(24, 0, 0, 0)
         sbl.addWidget(ver)
         body.addWidget(sb)
 
         self.stack = QStackedWidget()
         body.addWidget(self.stack, 1)
-        for name, builder in (("General", self._build_general), ("Dictionary", self._build_dictionary),
-                              ("Snippets", self._build_snippets), ("Styles", self._build_styles),
-                              ("About", self._build_about)):
-            self.nav.addItem(QListWidgetItem(name))
-            self.stack.addWidget(builder())
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.nav.currentRowChanged.connect(lambda _r: self._refresh_last_ctx())
-        self.nav.setCurrentRow(0)
+        self._page_index: dict[str, int] = {}
+        for key, name, builder in (("home", "Home", self._build_home),
+                                   ("transcriptions", "Transcriptions", self._build_transcriptions),
+                                   (None, "Settings", None),
+                                   ("general", "General", self._build_general),
+                                   ("dictionary", "Dictionary", self._build_dictionary),
+                                   ("snippets", "Snippets", self._build_snippets),
+                                   ("styles", "Styles", self._build_styles),
+                                   ("about", "About", self._build_about)):
+            it = QListWidgetItem(name)
+            if key is None:                       # group label between the app pages and the settings pages
+                it.setFlags(Qt.NoItemFlags)
+                it.setForeground(QColor(TEXT3))
+                it.setData(Qt.UserRole, -1)
+                self.nav.addItem(it)
+                continue
+            idx = self.stack.addWidget(builder())
+            self._page_index[key] = idx
+            it.setData(Qt.UserRole, idx)
+            self.nav.addItem(it)
+        self._settings_pages = {self._page_index[k] for k in ("general", "dictionary", "snippets", "styles", "about")}
+        self.nav.currentRowChanged.connect(self._nav_changed)
 
-        # bottom bar
+        # bottom bar (settings pages only)
         bar = QWidget()
         bar.setObjectName("bottomBar")
+        bar.setAttribute(Qt.WA_StyledBackground, True)
+        self.bottom_bar = bar
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(24, 12, 24, 12)
         bl.setSpacing(10)
@@ -519,7 +240,44 @@ class SettingsWindow(QWidget):
         self._saved_timer = QTimer(self)
         self._saved_timer.setSingleShot(True)
         self._saved_timer.timeout.connect(lambda: self.saved_label.setText(""))
+        self.show_page("home")
         self.reload()
+
+    # ----- navigation -----
+    def _nav_changed(self, row: int) -> None:
+        it = self.nav.item(row)
+        idx = it.data(Qt.UserRole) if it is not None else -1
+        if idx is None or idx < 0:
+            return
+        self.stack.setCurrentIndex(idx)
+        self.bottom_bar.setVisible(idx in self._settings_pages)
+        self._refresh_last_ctx()
+
+    def _goto_index(self, idx: int) -> None:
+        for r in range(self.nav.count()):
+            if self.nav.item(r).data(Qt.UserRole) == idx:
+                self.nav.setCurrentRow(r)
+                return
+
+    def show_page(self, name: str) -> None:
+        """Switch to a page by key ("home", "transcriptions", "general", ...). Never reloads the settings."""
+        idx = self._page_index.get(name)
+        if idx is not None:
+            self._goto_index(idx)
+
+    def current_page(self) -> str:
+        idx = self.stack.currentIndex()
+        return next((k for k, v in self._page_index.items() if v == idx), "")
+
+    def _build_home(self) -> QWidget:
+        from .home_ui import HomePage
+        self.home_page = HomePage(getattr(self.app, "history", None))
+        return self.home_page
+
+    def _build_transcriptions(self) -> QWidget:
+        from .transcripts_ui import TranscriptsPage
+        self.transcripts_page = TranscriptsPage(self.app, self.config)
+        return self.transcripts_page
 
     # ----- pages -----
     def _build_general(self) -> QWidget:
@@ -546,9 +304,51 @@ class SettingsWindow(QWidget):
         c.add_row("Hands-free lock", "While holding the hotkey, tap this key to keep recording without "
                   "holding. Tap the hotkey again to finish. (Edit handsfree_key in config.json.)",
                   self.handsfree_info)
-        self.mic_combo = _combo(300)
+        self.mic_combo = _combo(340)
         c.add_row("Microphone", "Auto follows the Windows default recording device, even when you change it later.", self.mic_combo)
         lay.addWidget(c)
+
+        # --- command mode + paste last
+        c = Card("Command mode")
+        self.cmd_sw = Switch()
+        c.add_row("Voice commands", "Hold the command keys and say what to do, like \"make this more formal\" or "
+                  "\"translate to German\". With text selected it rewrites the selection, otherwise it writes the "
+                  "answer at the cursor.", self.cmd_sw)
+        box = QWidget()
+        bl_ = QVBoxLayout(box)
+        bl_.setContentsMargins(0, 0, 0, 0)
+        bl_.setSpacing(6)
+        cm = QHBoxLayout()
+        cm.setSpacing(18)
+        self.cmd_boxes: dict[str, QCheckBox] = {}
+        for key, lbl in (("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift"), ("win", "Win")):
+            cb = QCheckBox(lbl)
+            cb.setCursor(Qt.PointingHandCursor)
+            self.cmd_boxes[key] = cb
+            cm.addWidget(cb)
+        cm.addStretch(1)
+        bl_.addLayout(cm)
+        self.cmd_error = _label("", "fieldError", wrap=True)
+        self.cmd_error.hide()
+        bl_.addWidget(self.cmd_error)
+        c.add_row("Command keys", "Hold these together for a command. They can't overlap the dictation keys. "
+                  "Ctrl+Win is the default.", box, stack=True)
+        self.paste_sw = Switch()
+        self.paste_key = QLineEdit()
+        self.paste_key.setReadOnly(True)
+        self.paste_key.setFixedWidth(140)
+        pk = QWidget()
+        pkl = QHBoxLayout(pk)
+        pkl.setContentsMargins(0, 0, 0, 0)
+        pkl.setSpacing(14)
+        pkl.addWidget(self.paste_key)
+        pkl.addWidget(self.paste_sw)
+        c.add_row("Paste last transcript", "Press this shortcut to paste your last dictation again. "
+                  "(Change the keys under paste_last in config.json.)", pk)
+        lay.addWidget(c)
+        for cb in list(self.mod_boxes.values()) + list(self.cmd_boxes.values()):
+            cb.toggled.connect(lambda _v: self._validate_cmd())
+        self.cmd_sw.toggled.connect(lambda _v: self._validate_cmd())
 
         # --- speech recognition
         c = Card("Speech recognition")
@@ -581,6 +381,12 @@ class SettingsWindow(QWidget):
         self.cleanup_sw = Switch()
         c.add_row("Clean up with local AI", "Removes filler words and fixes punctuation using a small local model.",
                   self.cleanup_sw)
+        self.llm_combo = _NoWheelCombo()      # the wheel would switch (and reload) models while scrolling
+        self.llm_combo.setFixedWidth(250)
+        self.llm_combo.activated.connect(self._model_picked)
+        c.add_row("Cleanup model", "The local model that does the cleanup (.gguf files in the models folder). "
+                  "Applies right away: the model reloads in a few seconds, basic cleanup is used meanwhile.",
+                  self.llm_combo)
         self.minwords_spin = QSpinBox()
         self.minwords_spin.setRange(0, 50)
         self.minwords_spin.setFixedWidth(90)
@@ -590,6 +396,33 @@ class SettingsWindow(QWidget):
         c.add_row("Transcribe while talking", "For long dictations (7 s+), finish sentences in the background at "
                   "natural pauses so text appears sooner after you release. Thresholds are in config.json under "
                   "\"streaming\".", self.stream_sw)
+        lay.addWidget(c)
+
+        # --- meetings + transcription
+        c = Card("Meetings and audio files")
+        self.meet_mic_combo = _combo(340)
+        c.add_row("Meeting microphone", "Recorded as You. Same as dictation uses the microphone picked above.",
+                  self.meet_mic_combo)
+        self.meet_out_combo = _combo(340)
+        c.add_row("Other people's audio", "The speakers or headset you hear the meeting on. LocalFlow records what "
+                  "plays there as Others.", self.meet_out_combo)
+        self.meet_style_combo = _combo(250)
+        c.add_row("Meeting style", "Raw keeps the words as heard. A style runs AI cleanup on each turn.",
+                  self.meet_style_combo)
+        self.file_style_combo = _combo(250)
+        c.add_row("Audio file style", "Preselected when you transcribe an audio file.", self.file_style_combo)
+        lay.addWidget(c)
+
+        # --- history
+        c = Card("History")
+        self.hist_sw = Switch()
+        c.add_row("Save dictation history", "Keep what you dictate on the Home page. Usage numbers count either way.",
+                  self.hist_sw)
+        self.retention_combo = _combo(180)
+        for days, lbl in RETENTION_CHOICES:
+            self.retention_combo.addItem(lbl, days)
+        c.add_row("Keep history for", "Older entries are deleted automatically.", self.retention_combo)
+        self.hist_sw.toggled.connect(self.retention_combo.setEnabled)
         lay.addWidget(c)
 
         # --- game mode
@@ -1059,7 +892,7 @@ class SettingsWindow(QWidget):
             except Exception as e:  # never let a bad rule break typing
                 txt, ok = f"error: {e}", False
         self.test_result.setText(txt)
-        self.test_result.setStyleSheet(f"color: {ACCENT_HOVER}; font-weight: 600;" if ok else f"color: {MUTED};")
+        self.test_result.setStyleSheet(f"color: {ACCENT_TEXT}; font-weight: 600;" if ok else f"color: {MUTED};")
 
     def _collect_profiles(self) -> list[dict] | None:
         """Rule list for saving, or None (with a message) when a rule has an invalid title regex."""
@@ -1067,7 +900,7 @@ class SettingsWindow(QWidget):
         for i, rule in enumerate(self._rules):
             err = self._regex_error(str(rule.get("title", "") or "").strip())
             if err:
-                self.nav.setCurrentRow(self.stack.indexOf(self._styles_page))
+                self._goto_index(self.stack.indexOf(self._styles_page))
                 self.rule_table.setCurrentCell(i, 2)
                 self._flash(f"Rule '{rule.get('name') or i + 1}': {err}", ok=False)
                 return None
@@ -1286,6 +1119,7 @@ class SettingsWindow(QWidget):
         for g in cfg.get("game_mode.processes", []) or []:
             self._append_game(str(g))
         self.minwords_spin.setValue(int(cfg.get("cleanup.min_words", 4)))
+        self._fill_models()
         self.overlay_sw.setChecked(bool(cfg.get("ui.overlay", True)))
         self.sounds_sw.setChecked(bool(cfg.get("ui.sounds", True)))
         self.vol_slider.setValue(int(round(float(cfg.get("ui.sound_volume", 0.25)) * 100)))
@@ -1293,6 +1127,7 @@ class SettingsWindow(QWidget):
             self.autostart_sw.setChecked(bool(self._autostart_get()))
         except Exception:
             self.autostart_sw.setChecked(False)
+        self._reload_new_general(cfg)
 
         # dictionary
         self.words_list.clear()
@@ -1319,8 +1154,7 @@ class SettingsWindow(QWidget):
         mods = [k for k in ("ctrl", "alt", "shift", "win") if self.mod_boxes[k].isChecked()]
         if not mods:
             self._flash("Pick at least one hotkey modifier", ok=False)
-            self.stack.setCurrentIndex(0)
-            self.nav.setCurrentRow(0)
+            self.show_page("general")
             return None
         words, seen = [], set()
         for i in range(self.words_list.count()):
@@ -1346,6 +1180,13 @@ class SettingsWindow(QWidget):
             txt = self.snip_table.item(r, 1).data(Qt.UserRole) or ""
             if a and txt:
                 snips[a] = txt
+        cmd_on = self.cmd_sw.isChecked()
+        cmd_mods = [k for k in ("ctrl", "alt", "shift", "win") if self.cmd_boxes[k].isChecked()]
+        err = self._validate_cmd()
+        if cmd_on and err:
+            self._flash(err, ok=False)
+            self.show_page("general")
+            return None
         profiles = self._collect_profiles()
         if profiles is None:
             return None
@@ -1366,7 +1207,108 @@ class SettingsWindow(QWidget):
             "snippets": snips,
             "auto_style": self.auto_sw.isChecked(),
             "profiles": profiles,
+            # an invalid combo with command mode off is not saved (the stored one stays)
+            "command_mode": {"enabled": cmd_on, **({"hotkey": "+".join(cmd_mods)} if not err else {})},
+            "paste_last": {"enabled": self.paste_sw.isChecked()},
+            "meetings": {"mic": self.meet_mic_combo.currentData() or "",
+                         "output_device": self.meet_out_combo.currentData() or "",
+                         "style": self.meet_style_combo.currentData() or "raw"},
+            "transcripts": {"file_style": self.file_style_combo.currentData() or "raw"},
+            "history": {"enabled": self.hist_sw.isChecked(),
+                        "retention_days": self.retention_combo.currentData() or 0},
         }
+
+    def _validate_cmd(self) -> str:
+        """Inline check of the command keys against the dictation keys; returns the error ("" = fine)."""
+        dic = [k for k, cb in self.mod_boxes.items() if cb.isChecked()]
+        cmd = [k for k, cb in self.cmd_boxes.items() if cb.isChecked()]
+        err = command_combo_error(dic, cmd)
+        on = self.cmd_sw.isChecked()
+        for cb in self.cmd_boxes.values():
+            cb.setEnabled(on)
+        self.cmd_error.setText(err)
+        self.cmd_error.setVisible(bool(err) and on)
+        return err
+
+    def _reload_new_general(self, cfg) -> None:
+        cmd = parse_mods(cfg.get("command_mode.hotkey", "ctrl+win"))
+        for k, cb in self.cmd_boxes.items():
+            cb.setChecked(k in cmd)
+        self.cmd_sw.setChecked(bool(cfg.get("command_mode.enabled", True)))
+        self.paste_sw.setChecked(bool(cfg.get("paste_last.enabled", True)))
+        self.paste_key.setText(fmt_chord(cfg.get("paste_last.hotkey", "alt+shift+z")) or "-")
+        self._validate_cmd()
+
+        devs = {}
+        if self._get_devices is not None:
+            try:
+                devs = self._get_devices() or {}
+            except Exception:
+                devs = {}
+        self.meet_mic_combo.clear()
+        self.meet_mic_combo.addItem("Same as dictation", "")
+        for n in devs.get("inputs", []) or []:
+            self.meet_mic_combo.addItem(n, n)
+        m = cfg.get("meetings.mic", "") or ""
+        if m:
+            _set_combo_data(self.meet_mic_combo, m, f"{m} (not connected)")
+        else:
+            self.meet_mic_combo.setCurrentIndex(0)
+        self.meet_out_combo.clear()
+        d_out = devs.get("default_output") or ""
+        self.meet_out_combo.addItem(f"Windows default ({d_out})" if d_out else "Windows default output", "")
+        for n in devs.get("outputs", []) or []:
+            self.meet_out_combo.addItem(n, n)
+        o = cfg.get("meetings.output_device", "") or ""
+        if o:
+            _set_combo_data(self.meet_out_combo, o, f"{o} (not connected)")
+        else:
+            self.meet_out_combo.setCurrentIndex(0)
+        names = transcript_style_names(cfg)
+        for combo, key in ((self.meet_style_combo, "meetings.style"), (self.file_style_combo, "transcripts.file_style")):
+            combo.clear()
+            for n in names:
+                combo.addItem("Raw (no cleanup)" if n == "raw" else n, n)
+            _set_combo_data(combo, str(cfg.get(key, "raw") or "raw"))
+
+        self.hist_sw.setChecked(bool(cfg.get("history.enabled", True)))
+        try:
+            days = int(float(cfg.get("history.retention_days", 0) or 0))
+        except Exception:
+            days = 0
+        _set_combo_data(self.retention_combo, days, f"{days} days")
+        self.retention_combo.setEnabled(self.hist_sw.isChecked())
+
+    def _fill_models(self) -> None:
+        cur = self.config.get("cleanup.model_path", "")
+        combo = self.llm_combo
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            idx = -1
+            for f in list_models():
+                path = f"models/{f}"
+                combo.addItem(model_display_name(f), path)
+                if idx < 0 and same_model(cur, path):
+                    idx = combo.count() - 1
+            if idx < 0 and cur:
+                combo.addItem(f"{model_display_name(cur)} (current)", cur)
+                idx = combo.count() - 1
+            combo.setCurrentIndex(idx)
+        finally:
+            combo.blockSignals(False)
+
+    def _model_picked(self, i: int) -> None:
+        # applied on its own (not through Save/_collect), so a stale dropdown can never undo a tray switch
+        path = self.llm_combo.itemData(i)
+        if not path or same_model(self.config.get("cleanup.model_path", ""), path):
+            return
+        try:
+            self.config.set("cleanup.model_path", path)
+        except Exception as e:
+            self._flash(f"Could not switch model: {e}", ok=False)
+            return
+        self._flash(f"Loading {model_display_name(path)}...", ok=True)
 
     def save(self) -> bool:
         data = self._collect()
@@ -1403,6 +1345,8 @@ class SettingsWindow(QWidget):
         if not e.spontaneous():
             self.reload()
         super().showEvent(e)
+        if not e.spontaneous():
+            QTimer.singleShot(0, self.setFocus)
 
     def closeEvent(self, e):
         e.ignore()

@@ -1,12 +1,15 @@
 """Global push-to-talk hotkey using a WH_KEYBOARD_LL hook (ctypes).
 
 Behaviour
-- Hold the configured modifier combo (default Ctrl+Alt, either side) -> on_start().
+- Two modifier combos: "dictate" (default Ctrl+Alt) and optionally "command" (default Ctrl+Win). Holding exactly
+  one of them (either side) -> on_start(mode). Neither may be a subset of the other (command mode is then off).
 - Release it -> on_stop().
 - Any non-modifier key while held (a real shortcut like Ctrl+Alt+T) -> on_cancel("shortcut"),
   the key is passed through untouched.
 - Tap Space while held -> hands-free lock (on_handsfree); keys can be released. Press the combo
-  again to stop, Esc to cancel.  Esc while holding also cancels.
+  again to stop, Esc to cancel.  Esc while holding also cancels. Same in both modes.
+- Optional "paste last" chord (default Alt+Shift+Z): in idle with exactly its modifiers held, its key is swallowed,
+  a menu mask is injected (no menu bar / keyboard-layout switch) and on_paste() fires.
 - When Alt/Win is part of the combo, a dummy unassigned keystroke (VK 0xE8) is injected just before
   the Alt/Win key-up so Windows does not open the menu bar / Start menu (AutoHotkey's "menu mask").
 
@@ -71,22 +74,73 @@ _VK_TO_GROUP.update({w.VK_CONTROL: "ctrl", w.VK_MENU: "alt", w.VK_SHIFT: "shift"
 _KEYNAME_TO_VK = {"space": w.VK_SPACE, "tab": w.VK_TAB, "enter": w.VK_RETURN, "backspace": w.VK_BACK}
 
 
+_ALIASES = {"control": "ctrl", "ctl": "ctrl", "menu": "alt", "windows": "win", "super": "win", "cmd": "win"}
+
+
+def _tokens(spec: str) -> list[str]:
+    toks = (t.strip().lower() for t in str(spec or "").replace(" ", "").split("+"))
+    return [_ALIASES.get(t, t) for t in toks if t]
+
+
 def parse_hotkey(spec: str) -> frozenset[str]:
-    mods = {p.strip().lower() for p in spec.replace(" ", "").split("+") if p.strip()}
-    aliases = {"control": "ctrl", "ctl": "ctrl", "menu": "alt", "windows": "win", "super": "win", "cmd": "win"}
-    mods = {aliases.get(m, m) for m in mods}
-    mods &= set(w.MODIFIER_VKS)
+    mods = set(_tokens(spec)) & set(w.MODIFIER_VKS)
     return frozenset(mods) if mods else frozenset({"ctrl", "alt"})
+
+
+def parse_combo(spec: str) -> Optional[frozenset[str]]:
+    """Strict modifier-only combo ("ctrl+win"); None if empty or it names anything but modifiers."""
+    toks = _tokens(spec)
+    if not toks or any(t not in w.MODIFIER_VKS for t in toks):
+        return None
+    return frozenset(toks)
+
+
+def _key_vk(name: str) -> Optional[int]:
+    if len(name) == 1 and name.isascii() and name.isalnum():
+        return ord(name.upper())
+    if name.startswith("f") and name[1:].isdigit() and 1 <= int(name[1:]) <= 24:
+        return 0x70 + int(name[1:]) - 1
+    return _KEYNAME_TO_VK.get(name)
+
+
+def parse_chord(spec: str) -> Optional[tuple[frozenset[str], int]]:
+    """"alt+shift+z" -> (modifiers, vk); None unless it is 1+ modifiers plus exactly one key."""
+    mods, vk = set(), None
+    for t in _tokens(spec):
+        if t in w.MODIFIER_VKS:
+            mods.add(t)
+        elif vk is None:
+            vk = _key_vk(t)
+            if vk is None:
+                return None
+        else:
+            return None
+    if not mods or vk is None:
+        return None
+    return frozenset(mods), vk
+
+
+def _fmt(combo) -> str:
+    return "+".join(sorted(combo))
 
 
 class HotkeyManager:
     def __init__(self, hotkey: str = "ctrl+alt", handsfree_key: str = "space", *,
-                 on_start: Callable[[], None], on_stop: Callable[[], None],
-                 on_cancel: Callable[[str], None], on_handsfree: Callable[[], None]):
-        self.required = parse_hotkey(hotkey)
+                 on_start: Callable[[str], None], on_stop: Callable[[], None],
+                 on_cancel: Callable[[str], None], on_handsfree: Callable[[], None],
+                 command_hotkey: Optional[str] = None, paste_hotkey: Optional[str] = None,
+                 on_paste: Optional[Callable[[], None]] = None):
+        self.required = parse_hotkey(hotkey)        # the dictation combo
         self.handsfree_vk = _KEYNAME_TO_VK.get(handsfree_key.lower(), w.VK_SPACE)
         self._cb_start, self._cb_stop = on_start, on_stop
         self._cb_cancel, self._cb_handsfree = on_cancel, on_handsfree
+        self._cb_paste = on_paste
+        self._command_spec, self._paste_spec = command_hotkey, paste_hotkey
+        self.command: Optional[frozenset[str]] = None              # command-mode combo (None = off)
+        self.paste: Optional[tuple[frozenset[str], int]] = None    # paste-last chord (None = off)
+        self._validate()
+        self.active_mode = "dictate"
+        self._active = self.required    # combo of the current / last activation (hold, locked, suppressed)
         self.enabled = True
         self.state = "idle"          # idle | hold | locked | suppressed
         self._armed_stop = False
@@ -106,13 +160,63 @@ class HotkeyManager:
         self.events_seen = 0
 
     # ------------------------------------------------------------------ public
+    def combos(self) -> dict[str, frozenset[str]]:
+        c = {"dictate": self.required}
+        if self.command is not None:
+            c["command"] = self.command
+        return c
+
+    def _validate(self) -> None:
+        """(Re)derive the command combo + paste chord from their specs, rejecting ones that collide."""
+        cmd = None
+        if self._command_spec:
+            cmd = parse_combo(self._command_spec)
+            if cmd is None:
+                log.warning("command mode hotkey %r is not a modifier combo - command mode off", self._command_spec)
+            elif cmd <= self.required or self.required <= cmd:
+                log.warning("command mode hotkey %s overlaps the dictation hotkey %s - command mode off",
+                            _fmt(cmd), _fmt(self.required))
+                cmd = None
+        self.command = cmd
+        chord = None
+        if self._paste_spec:
+            chord = parse_chord(self._paste_spec)
+            if chord is None:
+                log.warning("paste-last hotkey %r is not modifiers + one key - paste-last hotkey off", self._paste_spec)
+            elif any(c <= chord[0] for c in self.combos().values()):
+                log.warning("paste-last hotkey %r collides with a dictation/command hotkey - paste-last hotkey off",
+                            self._paste_spec)
+                chord = None
+        self.paste = chord
+
+    def _reset_after_change(self, why: str) -> None:
+        if self.state in ("hold", "locked"):
+            self._fire(self._cb_cancel, why)
+        self.state = "suppressed" if self._held_mods() else "idle"
+
     def set_hotkey(self, spec: str) -> None:
         with self._lock:
             self.required = parse_hotkey(spec)
-            if self.state in ("hold", "locked"):
-                self._fire(self._cb_cancel, "hotkey-changed")
-            self.state = "suppressed" if self._held_mods() else "idle"
-        log.info("hotkey set to %s", "+".join(sorted(self.required)))
+            self._validate()
+            self._reset_after_change("hotkey-changed")
+        log.info("hotkey set to %s", _fmt(self.required))
+
+    def set_command_hotkey(self, spec: Optional[str]) -> None:
+        """None / "" turns command mode off."""
+        with self._lock:
+            self._command_spec = spec or None
+            old = self.command
+            self._validate()
+            if old != self.command and self.active_mode == "command":
+                self._reset_after_change("hotkey-changed")
+        log.info("command hotkey set to %s", _fmt(self.command) if self.command else "off")
+
+    def set_paste_hotkey(self, spec: Optional[str]) -> None:
+        """None / "" turns the paste-last hotkey off."""
+        with self._lock:
+            self._paste_spec = spec or None
+            self._validate()
+        log.info("paste-last hotkey set to %s", self._paste_spec if self.paste else "off")
 
     def set_handsfree_key(self, name: str) -> None:
         self.handsfree_vk = _KEYNAME_TO_VK.get(name.lower(), w.VK_SPACE)
@@ -222,16 +326,21 @@ class HotkeyManager:
             if not self.enabled:
                 return False
             held = self._held_mods()
-            req = self.required
+            req = self._active
             st = self.state
 
             if mod:
                 if down:
-                    if st == "idle" and held == req:
-                        self.state = "hold"
-                        self._armed_stop = False
-                        self._needs_mask = bool(req & {"alt", "win"})
-                        self._fire(self._cb_start)
+                    if st == "idle":
+                        for mode, combo in self.combos().items():
+                            if held == combo:
+                                self.state = "hold"
+                                self.active_mode = mode
+                                self._active = req = combo
+                                self._armed_stop = False
+                                self._needs_mask = bool(req & {"alt", "win"})
+                                self._fire(self._cb_start, mode)
+                                break
                     elif st == "locked" and self._armed_stop and req <= held:
                         self.state = "suppressed"
                         self._fire(self._cb_stop)
@@ -244,8 +353,6 @@ class HotkeyManager:
                     self._armed_stop = True
                 elif st == "suppressed" and not held & req:
                     self.state = "idle"
-                if self.state == "idle" and held & req == set():
-                    pass
                 if mod in ("alt", "win") and self._needs_mask:
                     other_down = any(v != vk and _VK_TO_GROUP.get(v) == mod for v in self._down)
                     if not other_down:
@@ -256,6 +363,14 @@ class HotkeyManager:
             # ---- non-modifier key
             if not down:
                 return False
+            if st == "idle" and self.paste is not None and self._cb_paste is not None \
+                    and vk == self.paste[1] and held == self.paste[0]:
+                # paste-last chord: swallow the key (+ its repeats / key-up) and mask the modifiers' release so
+                # Windows neither opens the menu bar (Alt) nor switches the keyboard layout (Alt+Shift)
+                self._swallow.add(vk)
+                self._inject_mask()
+                self._fire(self._cb_paste)
+                return True
             if st == "hold":
                 if vk == self.handsfree_vk:
                     self.state = "locked"
@@ -292,8 +407,9 @@ class HotkeyManager:
                         self._handle(vk, False)
                 # 2) hotkey physically down but hook has seen nothing -> hook was probably dropped
                 phys = w.physical_modifiers_down()
-                if self.enabled and self.state == "idle" and phys == set(self.required) and \
-                        not self.required <= self._held_mods():
+                held = self._held_mods()
+                if self.enabled and self.state == "idle" and \
+                        any(phys == set(c) and not c <= held for c in self.combos().values()):
                     if self._desync_since is None:
                         self._desync_since = now
                     elif now - self._desync_since > 1.0:

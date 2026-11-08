@@ -50,9 +50,14 @@ _WS_EX_NOACTIVATE = 0x08000000
 _HWND_TOPMOST = -1
 _SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOZORDER, _SWP_NOACTIVATE, _SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x10, 0x20
 
-VIOLET = QColor(150, 122, 255)
-BLUE = QColor(86, 170, 255)
-REC_RED = QColor(255, 69, 58)
+# colours follow palette.py (accent blue, light accent, recording red)
+from .palette import OVERLAY_ACCENT, OVERLAY_LIGHT, REC  # noqa: E402
+
+ACCENT_C = QColor(OVERLAY_ACCENT)   # hands-free wave start, info dot
+LIGHT_C = QColor(OVERLAY_LIGHT)     # hands-free wave end, processing dots
+VIOLET = ACCENT_C                  # older names
+BLUE = LIGHT_C
+REC_RED = QColor(REC)
 
 
 def _lerp(a: float, b: float, t: float) -> float:
@@ -153,7 +158,8 @@ class Overlay(QWidget):
     # ------------------------------------------------------------------ public API
     def set_state(self, state: str, text: str = "") -> None:
         """Thread-safe. state: hidden|recording|handsfree|processing|error|info.
-        For recording/handsfree, ``text`` is an optional small style label shown in the pill ("casual · Discord")."""
+        For recording/handsfree/processing, ``text`` is an optional small label shown in the pill ("casual · Discord",
+        "Command", "Working…")."""
         self._sig_state.emit(str(state), str(text))
 
     def push_level(self, level: float) -> None:
@@ -248,7 +254,7 @@ class Overlay(QWidget):
         return QFontMetricsF(self._label_font).horizontalAdvance(text)
 
     def _target_width(self, state: str, text: str) -> float:
-        if state in ("recording", "handsfree"):
+        if state in ("recording", "handsfree", "processing"):    # optional label ("casual · Discord", "Working…")
             return WIDTHS[state] + self._label_width(text)
         if state in WIDTHS:
             return WIDTHS[state]
@@ -408,7 +414,12 @@ class Overlay(QWidget):
             if lw:
                 self._paint_label(p, rect, lw)
         elif mode == "processing":
-            self._paint_dots(p, rect, t)
+            lw = self._label_width(self._text)
+            if lw:      # dots on the left, label on the right (command mode: "Working…")
+                self._paint_dots(p, QRectF(rect.left(), rect.top(), WIDTHS["processing"], rect.height()), t)
+                self._paint_label(p, rect, lw)
+            else:
+                self._paint_dots(p, rect, t)
         elif mode == "error":
             self._paint_error(p, rect)
         elif mode == "info":
@@ -429,9 +440,9 @@ class Overlay(QWidget):
         if mode == "error":
             top, bot, border = QColor(84, 26, 32, 240), QColor(62, 18, 24, 240), QColor(255, 110, 110, 120)
         elif mode == "handsfree":
-            top, bot, border = QColor(30, 27, 46, 240), QColor(20, 19, 32, 240), QColor(160, 140, 255, 90)
+            top, bot, border = QColor(24, 31, 46, 240), QColor(17, 21, 32, 240), QColor(122, 170, 255, 95)
         else:
-            top, bot, border = QColor(30, 30, 36, 238), QColor(18, 18, 22, 238), QColor(255, 255, 255, 38)
+            top, bot, border = QColor(32, 33, 37, 238), QColor(22, 23, 26, 238), QColor(255, 255, 255, 36)
         g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
         g.setColorAt(0, top)
         g.setColorAt(1, bot)
@@ -458,7 +469,7 @@ class Overlay(QWidget):
 
     def _paint_lock(self, p: QPainter, rect: QRectF) -> None:
         cx, cy = rect.left() + 20, rect.center().y()
-        col = QColor(190, 170, 255)
+        col = QColor(160, 196, 255)
         pen = QPen(col, 1.7)
         pen.setCapStyle(Qt.RoundCap)
         p.setPen(pen)
@@ -474,7 +485,7 @@ class Overlay(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(col)
         p.drawRoundedRect(QRectF(cx - 5.6, cy - 1.0, 11.2, 8.6), 2.2, 2.2)
-        p.setBrush(QColor(30, 27, 46))
+        p.setBrush(QColor(24, 31, 46))
         p.drawEllipse(QPointF(cx, cy + 2.6), 1.2, 1.2)
         p.drawRect(QRectF(cx - 0.55, cy + 2.8, 1.1, 2.4))
 
@@ -517,7 +528,7 @@ class Overlay(QWidget):
         for i in range(3):
             ph = 0.5 + 0.5 * math.sin(t * 6.0 - i * 0.95)
             r = 2.6 + 1.7 * ph
-            col = QColor(205, 195, 255)
+            col = QColor(LIGHT_C)
             col.setAlpha(int(90 + 165 * ph))
             p.setBrush(col)
             p.drawEllipse(QPointF(cx + (i - 1) * 15, cy - 1.6 * (ph - 0.5)), r, r)

@@ -47,7 +47,25 @@ DEFAULT_STYLES: dict[str, dict[str, Any]] = {
                    "Use texting abbreviations ONLY for phrases the speaker actually said: idk, nvm, tbh, rn, omw, ngl, "
                    "imo, btw, omg, brb, idc, ttyl, lmk, fr. Still remove filler sounds (um, uh, er, hmm, \"you know\"). "
                    "Do not polish the grammar, and do not shorten single words (write \"you\", not \"u\"). "
-                   "Never add slang, emoji or words that were not said."),
+                   "Never add slang, emoji or words that were not said. "
+                   "Self-corrections still apply: after \"wait no\", \"or wait\", \"no wait\", \"sorry\", \"actually\" "
+                   "or \"i mean\" fixes a mistake, keep only the corrected version and drop the wrong part, the "
+                   "correction words and any leftover \"or\". "
+                   "FORMATTING, only around words that were said: when the speaker repeats someone's exact words "
+                   "(after tell it, tell him the problem, i told him, i said, she asked, he was like), put those exact "
+                   "words in double quotes; reported speech with \"that\" stays plain (tell him that its down), a "
+                   "description of how someone felt or acted is not a quote (he was like super confused), and "
+                   "\"like\" as filler or comparison never starts a quote. Wrap every command, file name with an "
+                   "extension (main.py, notes.txt), file path, code name and any code the speaker reads out loud in "
+                   "backticks, keeping their exact spelling and the spoken words; for code read out loud add only the "
+                   "symbols it needs (parentheses, quotes, dots, =), e.g. print goodbye -> `print(\"goodbye\")`. "
+                   "Text a program prints or outputs also goes in backticks (it would output `goodbye`). Normal uses "
+                   "of those words are not code (print the report, log in, i like python); never backtick links or "
+                   "names of programs, products, languages, sites or people (linux, discord, python, ai, chatgpt). "
+                   "In a long message with several separate points, start a new paragraph (blank line) only where the "
+                   "topic changes; keep the sentences of one point together, usually 3 or more per paragraph, never "
+                   "one paragraph per sentence."),
+        "paragraphs": True,      # streamed: long pause after 3+ spoken sentences starts a new paragraph (see join_pieces)
         "lowercase": True,
         "strip_trailing_period": True,
         "abbreviations": True,
@@ -109,10 +127,33 @@ DEFAULT_EXAMPLES: dict[str, list[list[str]]] = {
         ["I don't know, never mind, let's just do it tomorrow.", "idk nvm lets just do it tomorrow"],
         ["um yeah that sounds good to me, I'm on my way right now",
          "yeah that sounds good to me im omw rn"],
+        ["were meeting at the park friday, or wait no sorry saturday at noon",
+         "were meeting at the park saturday at noon"],
         ["Honestly I thought the movie was fine, but to be honest the ending was kind of boring.",
          "honestly i thought the movie was fine but tbh the ending was kinda boring"],
         ["Can you send me the link? Let me know when you're free.", "can you send me the link? lmk when youre free"],
         ["Grocery list, apples, bananas and cherries.", "grocery list:\n- apples\n- bananas\n- cherries"],
+        ["So if it doesn't run, just give it back to the AI and tell it the error, hey, this crashes on startup, "
+         "can you fix it? And it usually will.",
+         "so if it doesnt run just give it back to the ai and tell it the error \"hey this crashes on startup can "
+         "you fix it?\" and it usually will"],
+        ["And then I told him, just restart it, and he was like, I already did.",
+         "and then i told him \"just restart it\" and he was like \"i already did\""],
+        ["And she was like super confused the whole time, it was so funny.",
+         "and she was like super confused the whole time it was so funny"],
+        ["Can you zip up the screenshots folder and send me the notes dot txt file?",
+         "can you zip up the screenshots folder and send me the `notes.txt` file?"],
+        ["um you gotta run npm install first and then open the config dot json file",
+         "you gotta run `npm install` first and then open the `config.json` file"],
+        ["Like if you type print hi there it just shows hi there on the screen",
+         "like if you type `print(\"hi there\")` it just shows `hi there` on the screen"],
+        ["can you print the report for me before the meeting", "can you print the report for me before the meeting"],
+        ["Think of AI like a really good Lego builder. It can build all the pieces. But it sucks at putting them "
+         "together, so you just have to connect them yourself. And for my Discord bots, I just run them on an old "
+         "computer with Linux on it. Linux runs on pretty much any hardware, so it works fine.",
+         "think of ai like a really good lego builder it can build all the pieces but it sucks at putting them "
+         "together so you just have to connect them yourself\n\nand for my discord bots i just run them on an old "
+         "computer with linux on it linux runs on pretty much any hardware so it works fine"],
     ],
     "professional": [
         ["hey can you send me that report by friday thanks", "Hi, could you send me the report by Friday? Thanks."],
@@ -507,24 +548,50 @@ def layout_email(text: str) -> str:
     return t
 
 
+# inline `code` and ```fenced``` spans; a lone unmatched backtick is ordinary text
+_CODE_RX = re.compile(r"```.*?```|`[^`\n]+`", re.DOTALL)
+
+
+def outside_code(text: str, fn) -> str:
+    """Apply ``fn`` only to the parts of ``text`` outside code spans; code spans are kept byte for byte."""
+    if "`" not in text:
+        return fn(text)
+    out, pos = [], 0
+    for m in _CODE_RX.finditer(text):
+        if m.start() > pos:
+            out.append(fn(text[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    if pos < len(text):
+        out.append(fn(text[pos:]))
+    return "".join(out)
+
+
+def _lower_keep(t: str, preserve: Optional[list[str]]) -> str:
+    t = t.lower()
+    for w in preserve or []:   # keep dictionary spellings (names, acronyms) intact
+        w = w.strip()
+        if w:
+            t = re.sub(r"(?<![\w])" + re.escape(w) + r"(?![\w])", lambda m, w=w: w, t, flags=re.IGNORECASE)
+    return t
+
+
 def apply_style_def(text: str, sd: dict, abbr: Optional[dict[str, str]] = None,
                     preserve: Optional[list[str]] = None) -> str:
     """Deterministic post-processing of a style definition. Idempotent; safe on LLM output or regex output."""
     t = text
     if not t.strip():
         return t
+    # word-level rewrites never touch code spans (`npm install`, `README.md`): they are typed literally
     if sd.get("abbreviations"):
-        t = apply_abbreviations(t, abbr if abbr is not None else DEFAULT_ABBREVIATIONS)
+        ab = abbr if abbr is not None else DEFAULT_ABBREVIATIONS
+        t = outside_code(t, lambda s: apply_abbreviations(s, ab))
     if sd.get("word_map"):
-        t = apply_word_map(t, sd["word_map"])
+        t = outside_code(t, lambda s: apply_word_map(s, sd["word_map"]))
     if sd.get("drop_apostrophes"):
-        t = drop_apostrophes(t)
+        t = outside_code(t, drop_apostrophes)
     if sd.get("lowercase"):
-        t = t.lower()
-        for w in preserve or []:   # keep dictionary spellings (names, acronyms) intact
-            w = w.strip()
-            if w:
-                t = re.sub(r"(?<![\w])" + re.escape(w) + r"(?![\w])", lambda m, w=w: w, t, flags=re.IGNORECASE)
+        t = outside_code(t, lambda s: _lower_keep(s, preserve))
     if sd.get("email_layout"):
         t = layout_email(t)
     return strip_final_period(t, sd.get("strip_trailing_period"))

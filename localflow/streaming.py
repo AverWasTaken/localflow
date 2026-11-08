@@ -569,10 +569,11 @@ class StreamSession:
         with self._ulk:
             parts = [u.cleaned if u.cleaned is not None else u.raw for u in self._units]
             pauses = [u.pause_ms for u in self._units]
+            raws = [u.raw for u in self._units]
             llm = bool(self._units) and all(u.llm for u in self._units)
             reasons = sorted({u.reason for u in self._units if u.reason})
             units = len(self._units)
-        joined = join_pieces(parts, pauses if self.paragraphs else None, self.para_pause_ms)
+        joined = join_pieces(parts, pauses if self.paragraphs else None, self.para_pause_ms, raws=raws)
         text = textproc.apply_style(joined, self.sd, self.abbr, self.words)
         raw = " ".join(t for t in self._texts if t).strip()
         res = StreamResult(
@@ -594,9 +595,12 @@ class StreamSession:
 _LIST_LINE_RE = re.compile(r"^(?:- |\d+\. )")
 
 
-def join_pieces(parts: list[str], pauses: Optional[list[int]] = None, para_pause_ms: int = 900) -> str:
+def join_pieces(parts: list[str], pauses: Optional[list[int]] = None, para_pause_ms: int = 900,
+                raws: Optional[list[str]] = None) -> str:
     """Join cleaned pieces. With ``pauses`` (ms of silence before each piece) a long pause after a paragraph that
-    already holds >= 3 sentences starts a new paragraph - what the LLM does on its own in a single long pass."""
+    already holds >= 3 sentences starts a new paragraph - what the LLM does on its own in a single long pass.
+    ``raws`` (raw STT text parallel to ``parts``) is used to count sentences: styles like casual drop the periods,
+    so the cleaned piece alone would never reach 3 sentences."""
     out, sentences, words = "", 0, 0
     for k, p in enumerate(parts):
         p = p.strip(" ")
@@ -621,6 +625,11 @@ def join_pieces(parts: list[str], pauses: Optional[list[int]] = None, para_pause
             out += " " + p
         if out.endswith("\n"):
             sentences = words = 0
-        sentences += len(re.findall(r"[.!?](?:\s|$)", p))
+        src = raws[k] if raws is not None and k < len(raws) and raws[k] else p
+        if "\n" in p.strip():
+            # the piece already holds a line/paragraph break: count only what follows it (cleaned text)
+            p = src = p.rsplit("\n", 1)[-1]
+            sentences = words = 0
+        sentences += len(re.findall(r"[.!?](?:\s|$)", src))
         words += len(p.split())
     return out

@@ -9,3 +9,5 @@ psutil
 requests
 nvidia-cudnn-cu12
 nvidia-cublas-cu12
+PyAudioWPatch>=0.2.12.9
+soundfile>=0.12
