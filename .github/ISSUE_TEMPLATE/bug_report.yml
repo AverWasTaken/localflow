@@ -1,0 +1,74 @@
+name: Bug report
+description: Something in LocalFlow does not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Security problems should be reported privately instead: see SECURITY.md.
+        Please check the log before you paste it. It can contain text you dictated.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Hold Ctrl+Alt and say ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LocalFlow version
+      description: Shown in Windows Settings > Apps, or in the setup file name (LocalFlow-Setup-x.y.z.exe).
+      placeholder: "1.1.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Setup program (LocalFlow-Setup-x.y.z.exe)
+        - From source (install.ps1)
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: "Run `winver` to see it."
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and NVIDIA driver version
+      description: "Run `nvidia-smi` to see both. Write \"none\" if you have no NVIDIA GPU."
+      placeholder: "RTX 3060 12 GB, driver 580.xx"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Cleanup model
+      description: Which model is selected in the tray or Settings, or "AI cleanup off".
+      placeholder: "Qwen3.5-4B-Q8_0"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log
+      description: |
+        The relevant lines from `%APPDATA%\LocalFlow\localflow.log` (tray > Open log). For cleanup problems also
+        `llama-server.log`, for install problems `install.log` in the install folder
+        (`%LOCALAPPDATA%\Programs\LocalFlow` for the setup program). Remove any dictated text you do not want to share.
+      render: text
