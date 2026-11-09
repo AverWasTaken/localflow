@@ -7,7 +7,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/AverWasTaken/localflow" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6" alt="Windows 10 and 11">
   <img src="https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76B900" alt="NVIDIA CUDA">
-  <img src="https://img.shields.io/badge/runs-100%25%20offline-2f72e0" alt="Runs offline">
+  <img src="https://img.shields.io/badge/runs-offline%20after%20setup-2f72e0" alt="Runs offline after setup">
 </p>
 
 # LocalFlow
@@ -160,8 +160,10 @@ at most once a minute.
 | Normal shortcuts | Ctrl+Alt+anything else cancels the recording silently and the key goes through |
 
 Recordings under 0.3 s or silent are dropped. Utterances under 4 words skip the LLM (but still get the style's
-deterministic pass). The tray icon (a blue waveform) menu has Settings, History, Pause/Resume, an AI cleanup toggle,
-an **Auto style by app** toggle, a microphone picker, Open log and Quit.
+deterministic pass). The tray icon (a blue waveform) menu has Open LocalFlow (the Home window with your history),
+Settings, Start meeting recording, Transcribe audio file, Paste/Copy last transcript, Pause dictation, an AI cleanup
+toggle, Game mode (auto), an **Auto style by app** toggle, a microphone picker, a cleanup model picker, Open log and
+Quit.
 
 Snippets (Settings > Snippets): say the trigger phrase, get the expansion. Dictionary (Settings > Dictionary):
 custom words are fed to Whisper as hotwords and to the LLM as preferred spellings; replacement rules fix systematic
@@ -345,13 +347,14 @@ flowchart LR
 
 ## Privacy
 
-Everything runs on your machine. Audio is captured into memory, transcribed locally, and discarded; it is not written
-to disk. The cleanup LLM is a llama.cpp server bound to `127.0.0.1:8765`, started and stopped by LocalFlow. There is
+Everything runs on your machine. Dictation audio is captured into memory, transcribed locally, and discarded; it is
+not written to disk. Meeting recordings and transcripts, which you start yourself, are saved locally in
+`%APPDATA%\LocalFlow` (`recordings\` and `transcripts.db`). The cleanup LLM is a llama.cpp server bound to `127.0.0.1:8765`, started and stopped by LocalFlow. There is
 no telemetry and no account. The only network traffic is the one-time downloads (llama.cpp from GitHub, models from
 Hugging Face), which happen at install time or the first time you pick a new model.
 
 Transcripts are kept in a local SQLite history (`%APPDATA%\LocalFlow\history.db`, last 5000 entries) so you can see
-and copy past dictations. Turn it off with `"history": {"enabled": false}` or clear it from the History window.
+and copy past dictations. Turn it off with `"history": {"enabled": false}` or clear it with **Clear all** in the Home window's history list.
 Pasting goes through the clipboard; the previous clipboard contents are restored afterwards
 (`insert.restore_clipboard`).
 
@@ -408,7 +411,10 @@ localflow/           package: hotkey.py (WH_KEYBOARD_LL hook), audio.py (+ devwa
                      cleanup), textproc.py, inserter.py (clipboard/SendInput), pipeline.py, overlay.py,
                      settings_ui.py, history_ui.py, app.py (tray + wiring), autostart.py, config.py,
                      winutil.py (foreground window / process detection),
-                     gamemode.py (game process watcher)
+                     gamemode.py (game process watcher), gate.py (live dictation beats background GPU work),
+                     home_ui.py (stats + history), history.py (SQLite history), theme.py + palette.py (UI theme),
+                     recorder.py (meeting recorder), jobs.py (background transcription jobs),
+                     transcripts.py + transcripts_ui.py (transcript store and page), assistant.py (AI notes)
 bin/llama/           llama.cpp b12211 CUDA 13.5 build (llama-server.exe), downloaded by install.ps1
 bin/uv/              pinned uv, downloaded by install.ps1; python/ holds the Python it installs
 models/              Qwen3.5-4B-Q8_0.gguf, downloaded by install.ps1
