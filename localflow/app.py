@@ -13,11 +13,12 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap, QBrush, QPen
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QSystemTrayIcon
 
-from . import __version__, ask, autostart, fieldprobe, sounds, styles, winutil
+from . import __version__, ask, autostart, fieldprobe, modeldl, sounds, styles, winutil
 from .audio import AudioInput, default_input_name, input_device_names
 from .audioutil import normalize, peak_window_rms
 from .autocomplete import Autocomplete
-from .cleanup import Cleaner, list_models, model_display_name, reasoning_budget_for, resolve_path, same_model
+from .cleanup import (Cleaner, list_model_choices, model_display_name, reasoning_budget_for, resolve_path,
+                      same_model)
 from .config import Config
 from .gamemode import GameWatcher
 from .gate import ForegroundGate
@@ -131,6 +132,8 @@ class LocalFlowApp:
         self.audio.on_device_change = lambda name: self._set_status(f"Ready - mic: {name}", "ready")
         self.stt = Transcriber(self.cfg)
         self.cleaner = Cleaner(self.cfg)
+        self.downloads = modeldl.ModelDownloader()     # the default cleanup model is fetched on first start
+        self._dl_pct = -1
         self.pipeline = Pipeline(self.cfg, self.stt, self.cleaner, self.history, self._insert_dictation)
         self.hotkey = HotkeyManager(
             os.environ.get("LOCALFLOW_TEST_HOTKEY") or self.cfg.get("hotkey", "ctrl+alt"),
@@ -972,7 +975,8 @@ class LocalFlowApp:
                     get_vad_model()
                 except Exception:
                     log.exception("VAD preload failed")
-                self.cleaner.start()
+                if not self._ensure_cleanup_model():    # still downloading: its completion starts the server
+                    self.cleaner.start()
                 dev, mname, comp = self.stt.device, self.stt.model_name, self.stt.compute
             gpu = "GPU" if dev == "cuda" else "CPU (fallback)"
             mic = self.audio.device_name
@@ -1062,7 +1066,10 @@ class LocalFlowApp:
                     get_vad_model()
                 except Exception:
                     log.exception("VAD preload failed")
-                self.cleaner.resume()
+                if self._ensure_cleanup_model():
+                    self.cleaner.server.suspended = False   # model still downloading: its completion starts it
+                else:
+                    self.cleaner.resume()
             except Exception:
                 log.exception("game mode: reload after game failed")
             finally:
@@ -1152,17 +1159,24 @@ class LocalFlowApp:
                     (ch("cleanup", "model_reasoning") and getattr(ch, "reasoning_launch_changed", True)):
                 self._apply_cleanup_model()
             if ch("cleanup", "enabled") and self.cfg.get("cleanup.enabled"):
-                self.cleaner.start()
+                if not self._ensure_cleanup_model():
+                    self.cleaner.start()
             if ch("ui", "sound_volume"):
                 sounds.ensure_sounds(float(self.cfg.get("ui.sound_volume", 0.25)))
         except Exception:
             log.exception("applying config failed")
 
-    def _apply_cleanup_model(self) -> None:
+    def _apply_cleanup_model(self, background: bool = False) -> None:
         """Cleanup model (or its launch settings) changed: restart llama-server with it. Dictations meanwhile
-        fall back to the basic regex cleanup. A failed load stays failed (no silent switch back)."""
+        fall back to the basic regex cleanup. A failed load stays failed (no silent switch back).
+        A downloadable model (modeldl.REGISTRY) that is not in models/ yet is downloaded first; a server running
+        the previous model keeps serving until the download finishes and this runs again.
+        ``background``: not started by the user (a download finished) - toasts wait for a running dictation."""
+        say = self.bridge.toast.emit if background else self._ov
         name = model_display_name(self.cfg.get("cleanup.model_path", ""))
         with self._gpu_lock:
+            if self._shutdown.is_set():     # quitting: never (re)start llama-server after cleaner.shutdown()
+                return
             if self.game_active:
                 log.info("cleanup model changed during game mode - %s loads when the game closes", name)
                 return
@@ -1170,20 +1184,89 @@ class LocalFlowApp:
                 self.cleaner.restart()      # just stops a server running the old model
                 self._set_status(f"Cleanup model set to {name} (AI cleanup is off)", "ready")
                 return
+            if self._ensure_cleanup_model():
+                return
             log.info("switching cleanup model to %s", name)
             self._set_status(f"Loading cleanup model {name}...", "busy")
-            self._ov("info", f"Loading {name}...")
+            say("info", f"Loading {name}...")
             t0 = time.perf_counter()
             ok = self.cleaner.restart()
         if ok:
             log.info("cleanup model %s ready in %.1fs", name, time.perf_counter() - t0)
             self._set_status(f"Ready - cleanup model: {name}", "ready")
-            self._ov("info", f"Cleanup model: {name}")
+            say("info", f"Cleanup model: {name}")
         else:
             why = self.cleaner.server.failed or "timed out"
             log.error("cleanup model %s failed to load: %s", name, why)
             self._set_status(f"Cleanup model {name} failed to load - see log", "error")
-            self._ov("error", f"{name} failed to load")
+            say("error", f"{name} failed to load")
+
+    # ------------------------------------------------------------------ cleanup model download
+    def _missing_download(self, path: str) -> Optional[modeldl.ModelInfo]:
+        """Registry entry if ``path`` names a downloadable model in models/ whose file is not there yet."""
+        info = modeldl.lookup(os.path.basename(str(path or "")))
+        if info is None or not same_model(path, f"models/{info.name}"):
+            return None
+        try:
+            if resolve_path(path).is_file():
+                return None
+        except OSError:
+            pass
+        return info
+
+    def _ensure_cleanup_model(self) -> bool:
+        """Never blocks. If AI cleanup is on and the configured model is a downloadable one that is missing, start
+        downloading it (unless that is already running) and return True: the caller must not start llama-server
+        now, the download's completion does. A failed download is retried only when this runs again (next app
+        start, picking the model again, turning AI cleanup back on): no retry loop."""
+        if not self.cfg.get("cleanup.enabled", True):
+            return False
+        info = self._missing_download(self.cfg.get("cleanup.model_path", ""))
+        if info is None:
+            return False
+        if not self.downloads.active(info.name):
+            self._dl_pct = -1
+        if self.downloads.start(info.name, self._on_download_progress, self._on_download_done):
+            meanwhile = "the current model is used meanwhile" if self.cleaner.server.ready else \
+                "dictation works meanwhile with basic cleanup"
+            log.info("cleanup model %s is missing - downloading it", info.name)
+            self.bridge.toast.emit("info", f"Downloading the cleanup model ({modeldl.gb(info.size)} GB) - {meanwhile}")
+            self._set_status(self._download_text(info.name, 0, info.size), "ready")
+        return True
+
+    @staticmethod
+    def _download_text(name: str, done: int, total: int) -> str:
+        pct = int(done * 100 / total) if total else 0
+        return (f"Downloading cleanup model {model_display_name(name)} ... {pct}% "
+                f"({modeldl.gb(done)} / {modeldl.gb(total)} GB)")
+
+    def _configured(self, name: str) -> bool:
+        return same_model(self.cfg.get("cleanup.model_path", ""), f"models/{name}")
+
+    def _on_download_progress(self, name: str, done: int, total: int) -> None:
+        """Download thread: tray tooltip / status (bridge.status is a queued signal), at most once per percent."""
+        pct = int(done * 100 / total) if total else 0
+        if pct == self._dl_pct or not self._configured(name):
+            return
+        self._dl_pct = pct
+        self._set_status(self._download_text(name, done, total), "ready")
+
+    def _on_download_done(self, name: str, ok: bool, err: str) -> None:
+        """Download thread: load the model if it is still the configured one (same path as a model switch)."""
+        if self._shutdown.is_set():
+            return
+        disp = model_display_name(name)
+        if not ok:
+            using = "keeping the current model" if self.cleaner.server.ready else "using basic cleanup"
+            self.bridge.toast.emit("error", f"Cleanup model download failed - {using} (see log)")
+            if self._configured(name):
+                self._set_status(f"Cleanup model download failed ({err[:40]}) - retries on next start", "error")
+            return
+        if not self._configured(name):
+            self.bridge.toast.emit("info", f"{disp} downloaded - pick it under Cleanup model")
+            return
+        self.bridge.toast.emit("info", f"Cleanup model downloaded - loading {disp}")
+        self._apply_cleanup_model(background=True)
 
     # ------------------------------------------------------------------ tray
     def _build_tray(self) -> None:
@@ -1298,10 +1381,13 @@ class LocalFlowApp:
         grp = QActionGroup(self.model_menu)
         grp.setExclusive(True)
         cur = self.cfg.get("cleanup.model_path", "")
-        files = list_models()
+        files = list_model_choices()        # files in models/ + downloadable models not fetched yet
         found = False
-        for f in files:
-            act = self.model_menu.addAction(model_display_name(f))
+        for f, label in files:
+            prog = self.downloads.progress(f)
+            if prog:
+                label = f"{model_display_name(f)} (downloading {int(prog[0] * 100 / max(1, prog[1]))}%)"
+            act = self.model_menu.addAction(label)
             act.setCheckable(True)
             on = same_model(cur, f"models/{f}")
             found = found or on
@@ -1319,6 +1405,7 @@ class LocalFlowApp:
     def select_cleanup_model(self, filename: str) -> None:
         path = f"models/{filename}"
         if same_model(self.cfg.get("cleanup.model_path", ""), path):
+            self._ensure_cleanup_model()    # picked again after a failed download: try once more
             return
         self.cfg.set("cleanup.model_path", path)    # saved + _on_config_change restarts the server
         if self.settings_win is not None:
@@ -1370,6 +1457,7 @@ class LocalFlowApp:
     def quit(self) -> None:
         log.info("quitting")
         self._shutdown.set()
+        self.downloads.cancel_all()     # a model download keeps its .part and resumes on the next start
         self.outmute.shutdown()         # speakers back on even if we quit mid-dictation
         try:
             self.tts.shutdown("quit")

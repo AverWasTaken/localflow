@@ -309,7 +309,8 @@ class DriftGuard(unittest.TestCase):
 
 class StyleMessages(unittest.TestCase):
     def test_prompt_contains_style_rules_and_examples(self):
-        cfg = make_cfg()
+        # a model on the full few-shot prompt (the default LocalFlow fine-tune gets the compact prompt, no examples)
+        cfg = make_cfg(cleanup__model_path="models/Qwen3.5-4B-Q8_0.gguf")
         cl = Cleaner(cfg)
         msgs = cl._messages("hello there", styles.get_style(cfg, "casual"), ["Maria"])
         last = msgs[-1]["content"]

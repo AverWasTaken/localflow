@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 
 from . import __version__
 from . import styles as _styles
-from .cleanup import list_models, model_display_name, same_model
+from . import modeldl
+from .cleanup import list_model_choices, model_display_name, resolve_path, same_model
 from .paths import CONFIG_PATH, LOG_PATH
 
 # ---------------------------------------------------------------- theme (lives in theme.py; re-exported here)
@@ -1427,9 +1428,9 @@ class SettingsWindow(QWidget):
         try:
             combo.clear()
             idx = -1
-            for f in list_models():
+            for f, label in list_model_choices():     # + downloadable models not fetched yet ("(download, 1.7 GB)")
                 path = f"models/{f}"
-                combo.addItem(model_display_name(f), path)
+                combo.addItem(label, path)
                 if idx < 0 and same_model(cur, path):
                     idx = combo.count() - 1
             if idx < 0 and cur:
@@ -1528,7 +1529,19 @@ class SettingsWindow(QWidget):
     def _model_picked(self, i: int) -> None:
         # applied on its own (not through Save/_collect), so a stale dropdown can never undo a tray switch
         path = self.llm_combo.itemData(i)
-        if not path or same_model(self.config.get("cleanup.model_path", ""), path):
+        if not path:
+            return
+        info = modeldl.lookup(Path(path).name)
+        missing = info is not None and not resolve_path(path).is_file()
+        if same_model(self.config.get("cleanup.model_path", ""), path):
+            # picked again: retry a download that failed (the app ignores it if one is running or AI cleanup is off)
+            if missing and self.app is not None and self.config.get("cleanup.enabled", True):
+                try:
+                    self.app.select_cleanup_model(Path(path).name)
+                    self._flash(f"Downloading {model_display_name(path)} ({modeldl.gb(info.size)} GB) - it loads "
+                                "when the download is done", ok=True)
+                except Exception as e:
+                    self._flash(f"Could not start the download: {e}", ok=False)
             return
         try:
             self.config.set("cleanup.model_path", path)
@@ -1536,7 +1549,14 @@ class SettingsWindow(QWidget):
             self._flash(f"Could not switch model: {e}", ok=False)
             return
         self._fill_reasoning()
-        self._flash(f"Loading {model_display_name(path)}...", ok=True)
+        if missing:
+            if self.config.get("cleanup.enabled", True):
+                self._flash(f"Downloading {model_display_name(path)} ({modeldl.gb(info.size)} GB) - it loads when "
+                            "the download is done", ok=True)
+            else:
+                self._flash(f"{model_display_name(path)} downloads when AI cleanup is turned on", ok=True)
+        else:
+            self._flash(f"Loading {model_display_name(path)}...", ok=True)
 
     def save(self) -> bool:
         data = self._collect()

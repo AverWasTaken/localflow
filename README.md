@@ -57,12 +57,18 @@ Inspired by Wispr Flow. Not affiliated.
 - Home window with your dictation history and stats, plus a tray icon with pause, mic picker and Settings.
 - If the LLM is unavailable or produces something off, a deterministic regex cleaner takes over.
 
-## Custom-trained model (coming in the next release)
+## Custom-trained model (default since v1.2.0)
 
-The current release (v1.1.1) cleans up text with Qwen3.5-4B. The next release adds a cleanup model trained
-specifically for LocalFlow: **Liquid AI's LFM3-1.7B, fine-tuned with LoRA** on LocalFlow's cleanup styles and command
-mode. The training data is a mix of synthetic examples and a curated set of the author's own dictations. That data is
-not published.
+Since v1.2.0 LocalFlow cleans up text with a model trained specifically for it: **Liquid AI's LFM3-1.7B, fine-tuned
+with LoRA** on LocalFlow's cleanup styles and command mode (`LFM3-1.7B-LocalFlow-r1e3-Q8_0.gguf`, about 1.8 GB). It is
+the default cleanup model and is downloaded automatically: setup fetches it from this repository's GitHub release,
+and if it is missing (setup skipped it, or the download failed) LocalFlow downloads it on its first start, checks its
+SHA-256 and loads it. Dictation works meanwhile with the basic regex cleanup, and the tray tooltip shows the progress.
+Earlier releases used Qwen3.5-4B; it is still available (install with `-WithQwen`, or drop any `.gguf` into `models`)
+and can be picked from the tray or Settings. Existing installs keep the model they had selected.
+
+The training data is a mix of synthetic examples and a curated set of the author's own dictations. That data is not
+published.
 
 On an internal benchmark (test set built by the author, both models quantized to Q8_0, scored as the share of
 automated checks passed):
@@ -87,8 +93,9 @@ the real-dictation result points the same way. The model's weights are covered b
 2. Run it. Windows SmartScreen may warn you because the installer isn't code-signed: click **More info**, then
    **Run anyway**.
 3. Click through the setup. After copying its files it opens a PowerShell window and downloads everything LocalFlow
-   needs: Python, the Python packages, llama.cpp and the AI models (about 7 GB, or about 2.5 GB if you untick the AI
-   cleanup model). Windows asks for admin permission once, to add the startup task.
+   needs: Python, the Python packages, llama.cpp and the AI models (about 4.3 GB, or about 2.5 GB if you untick the AI
+   cleanup model; LocalFlow then downloads it, about 1.8 GB, when it first starts). Windows asks for admin permission
+   once, to add the startup task.
 4. When it's done, LocalFlow starts in the system tray. Hold **Ctrl+Alt** and talk.
 
 It installs into `%LOCALAPPDATA%\Programs\LocalFlow` and adds LocalFlow to the Start Menu. If something fails
@@ -110,8 +117,8 @@ The first launch on a new GPU can take about 30 seconds while CUDA compiles its 
 - An NVIDIA GPU with 6 GB of VRAM or more is recommended (RTX 20-series or newer). The speech model and the cleanup
   model both live on the GPU.
 - NVIDIA driver 580 or newer (the bundled llama.cpp build uses CUDA 13). Get it from nvidia.com/drivers.
-- About 10 GB of free disk: roughly 3 GB for the Python environment, 4.5 GB for the cleanup model, 1.6 GB for the
-  speech model, 0.6 GB for llama.cpp.
+- About 7 GB of free disk: roughly 3 GB for the Python environment, 1.8 GB for the cleanup model, 1.6 GB for the
+  speech model, 0.6 GB for llama.cpp (4.5 GB more with the optional Qwen3.5-4B model).
 - A microphone and an internet connection during setup. After that everything runs offline.
 
 No NVIDIA GPU? It still runs on the CPU, slower and without the AI cleanup. See [Running without a GPU](#running-without-a-gpu).
@@ -126,9 +133,11 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 `install.ps1` is the same script the setup program runs. It checks your system, downloads a pinned copy of
 [uv](https://docs.astral.sh/uv/) (which fetches Python 3.12 into the `python` folder), creates `.venv`, installs the
-dependencies, downloads the llama.cpp CUDA build, the Qwen3.5-4B Q8_0 model (from Hugging Face) and the Whisper
-model, then registers a Task Scheduler task called `LocalFlow` and starts it. Downloads from GitHub are checked
-against pinned SHA-256 hashes. Re-running it repairs a broken install. Flags: `-SkipModel` (no cleanup model),
+dependencies, downloads the llama.cpp CUDA build, the fine-tuned LFM3-1.7B cleanup model (from this repository's
+GitHub release) and the Whisper model, then registers a Task Scheduler task called `LocalFlow` and starts it.
+Downloads from GitHub are checked against pinned SHA-256 hashes. Re-running it repairs a broken install. Flags:
+`-SkipModel` (no cleanup model now; LocalFlow downloads it on its first start), `-WithQwen` (also download
+Qwen3.5-4B Q8_0 from Hugging Face, about 4.5 GB, as a second cleanup model to pick from the tray),
 `-NoTask` (no startup task, no admin prompt), `-NoStart` (don't launch at the end), `-SkipTts` (no voice for
 spoken answers; it is only installed with an NVIDIA GPU of 10 GB or more anyway, and a failure there never fails the
 setup). Everything is logged to
@@ -151,7 +160,7 @@ attaches it to the release (`.github/workflows/release.yml`).
 
 If `nvidia-smi` is missing the installer says so and carries on. At startup LocalFlow notices there is no CUDA
 device and loads `small.en` on the CPU (int8) instead of large-v3-turbo. The installer also writes a config with AI
-cleanup turned off, because a 4B LLM on a CPU is too slow to be useful; the regex cleaner handles fillers and
+cleanup turned off, because the cleanup LLM is too slow on a CPU to be useful; the regex cleaner handles fillers and
 punctuation instead. You can switch cleanup on from the tray menu and see how it feels on your machine. If the
 llama.cpp server cannot start for any reason, dictation keeps working with the regex cleaner and the server is retried
 at most once a minute.
@@ -427,7 +436,8 @@ localflow/           package: hotkey.py (WH_KEYBOARD_LL hook), audio.py (+ devwa
                      transcripts.py + transcripts_ui.py (transcript store and page), assistant.py (AI notes)
 bin/llama/           llama.cpp b12211 CUDA 13.5 build (llama-server.exe), downloaded by install.ps1
 bin/uv/              pinned uv, downloaded by install.ps1; python/ holds the Python it installs
-models/              Qwen3.5-4B-Q8_0.gguf, downloaded by install.ps1
+models/              LFM3-1.7B-LocalFlow-r1e3-Q8_0.gguf (default cleanup model), downloaded by install.ps1 or by
+                     the app on first start (localflow/modeldl.py); any other .gguf you add (e.g. Qwen3.5-4B, -WithQwen)
 scripts/             register-task.ps1 (startup task), stop.ps1, launch.pyw (Start Menu entry), lfcommon.ps1
 installer/           LocalFlow.iss (Inno Setup script) and build.ps1 -> dist/LocalFlow-Setup-<version>.exe
 tests/               test_unit_*.py (offline), test_cleanup.py, test_e2e.py, bench_streaming.py, gen_bench_corpus.py,
@@ -437,8 +447,7 @@ docs/assets/         logo and README artwork
 
 ## Roadmap
 
-- **Next release:** ship the custom fine-tuned LFM3-1.7B cleanup model described above, after a second training
-  round for command mode.
+- **Next:** a second training round of the fine-tuned cleanup model for command mode.
 - Ideas and bug reports are welcome in [issues](https://github.com/AverWasTaken/localflow/issues).
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
@@ -460,8 +469,8 @@ their own licenses:
 |---|---|---|
 | [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) ([faster-whisper conversion](https://huggingface.co/h2oai/faster-whisper-large-v3-turbo)) | speech-to-text on the GPU | MIT |
 | [Whisper small.en](https://huggingface.co/Systran/faster-whisper-small.en) | speech-to-text on the CPU fallback | MIT |
-| [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) ([GGUF](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF)) | text cleanup (current release) | Apache 2.0 |
-| [LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B), fine-tuned for LocalFlow | text cleanup (next release) | [LFM Open License v1.0](https://www.liquid.ai/lfm-license) |
+| [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) ([GGUF](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF)) | text cleanup (optional, default before v1.2.0) | Apache 2.0 |
+| [LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B), fine-tuned for LocalFlow | text cleanup (default) | [LFM Open License v1.0](https://www.liquid.ai/lfm-license) |
 
 Python dependencies and llama.cpp keep their own licenses as well.
 

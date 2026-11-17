@@ -26,7 +26,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -NoTask -NoStart
 ```
 
 `-NoTask` skips the startup task (and the admin prompt), `-NoStart` skips launching the app at the end. Add
-`-SkipModel` to skip the 4.5 GB cleanup model.
+`-SkipModel` to skip the 1.8 GB cleanup model (the app then downloads it on first start).
 
 If you only want to work on code and run the unit tests, a plain virtual environment is enough:
 

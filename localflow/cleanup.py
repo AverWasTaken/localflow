@@ -16,7 +16,7 @@ from typing import Optional
 
 import requests
 
-from . import ask, keepwords, pycalc, styles, textproc
+from . import ask, keepwords, modeldl, pycalc, styles, textproc
 from .paths import PROJECT_DIR, DATA_DIR, MODELS_DIR
 
 log = logging.getLogger(__name__)
@@ -36,6 +36,20 @@ def list_models(models_dir: Optional[Path] = None) -> list[str]:
     except OSError:
         return []
     return sorted(names, key=str.lower)
+
+
+def list_model_choices(models_dir: Optional[Path] = None) -> list[tuple[str, str]]:
+    """Entries for the model pickers (tray menu, Settings): (file name, label), sorted by file name. The .gguf files
+    in models/ plus every downloadable model (modeldl.REGISTRY) that is not there yet, labelled
+    "<name> (download, 1.7 GB)"; picking one of those downloads it, then loads it."""
+    d = Path(models_dir) if models_dir is not None else MODELS_DIR
+    present = list_models(d)
+    have = {n.lower() for n in present}
+    out = [(n, model_display_name(n)) for n in present]
+    for name, info in modeldl.REGISTRY.items():
+        if name.lower() not in have:
+            out.append((name, f"{model_display_name(name)} (download, {modeldl.gb(info.size)} GB)"))
+    return sorted(out, key=lambda e: e[0].lower())
 
 
 def model_display_name(path: str) -> str:

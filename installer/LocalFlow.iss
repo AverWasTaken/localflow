@@ -52,10 +52,10 @@ UsePreviousTasks=yes
 RedirectionGuard=no
 
 [Messages]
-WelcomeLabel2=This will install [name/ver] on your computer.%n%nAfter copying its files, setup downloads Python, the Python packages, llama.cpp and the AI models (about 7 GB in total, or about 2.5 GB without the AI cleanup model; with an NVIDIA GPU about 10 GB more for the voice that reads answers aloud). Keep the computer online until it finishes. A PowerShell window shows the progress.%n%nWindows asks for admin permission once, to add the startup task that lets LocalFlow type into apps running as administrator.
+WelcomeLabel2=This will install [name/ver] on your computer.%n%nAfter copying its files, setup downloads Python, the Python packages, llama.cpp and the AI models (about 4.3 GB in total, or about 2.5 GB without the AI cleanup model, which LocalFlow then downloads when it first starts; with an NVIDIA GPU about 10 GB more for the voice that reads answers aloud). Keep the computer online until it finishes. A PowerShell window shows the progress.%n%nWindows asks for admin permission once, to add the startup task that lets LocalFlow type into apps running as administrator.
 
 [Tasks]
-Name: "downloadmodel"; Description: "Download the AI cleanup model (about 4.5 GB, recommended with an NVIDIA GPU)"; GroupDescription: "Optional downloads:"
+Name: "downloadmodel"; Description: "Download the AI cleanup model now (about 1.8 GB, recommended with an NVIDIA GPU; otherwise LocalFlow downloads it when it first starts)"; GroupDescription: "Optional downloads:"
 Name: "speakanswers"; Description: "Download the voice that reads command-mode answers aloud (about 10 GB, NVIDIA GPU only)"; GroupDescription: "Optional downloads:"
 
 [InstallDelete]

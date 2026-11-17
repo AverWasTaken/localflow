@@ -124,7 +124,7 @@ DEFAULTS: dict[str, Any] = {
     "cleanup": {
         "enabled": True,
         "min_words": 4,              # skip the LLM for utterances shorter than this
-        "model_path": "models/Qwen3.5-4B-Q8_0.gguf",
+        "model_path": "models/LFM3-1.7B-LocalFlow-r1e3-Q8_0.gguf",   # downloaded on first start (modeldl.py)
         "server_exe": "bin/llama/llama-server.exe",
         "port": 8765,
         "gpu_layers": 99,

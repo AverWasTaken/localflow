@@ -4,12 +4,13 @@
 # Safe to run again: it repairs whatever is missing and skips what is already in place.
 # Flags:
 #   -NoStart       don't launch LocalFlow at the end
-#   -SkipModel     don't download the AI cleanup model (about 4.5 GB)
+#   -SkipModel     don't download the AI cleanup model (about 1.8 GB); LocalFlow then downloads it on its first start
+#   -WithQwen      also download Qwen3.5-4B Q8_0 (about 4.5 GB), the previous cleanup model (pick it in the tray menu)
 #   -NoTask        don't register the "LocalFlow" startup task (no admin prompt)
 #   -SkipTts       don't install the voice that reads command-mode answers aloud (about 10 GB; NVIDIA GPU only)
 #   -PauseOnError  on failure, wait for Enter before the window closes
 # Everything is logged to install.log next to this script. Exit code 0 = success.
-param([switch]$NoStart, [switch]$SkipModel, [switch]$NoTask, [switch]$SkipTts, [switch]$PauseOnError)
+param([switch]$NoStart, [switch]$SkipModel, [switch]$WithQwen, [switch]$NoTask, [switch]$SkipTts, [switch]$PauseOnError)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # the progress bar makes Invoke-WebRequest very slow in Windows PowerShell
@@ -27,12 +28,18 @@ $LlamaAssets = [ordered]@{
     'llama-b12211-bin-win-cuda-13.5-x64.zip' = 'dc396a25a42729178d991d3913e6fd3619cfb446f6af0937bdec5d03e5375b56'
     'cudart-llama-bin-win-cuda-13.5-x64.zip' = 'c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba'
 }
-$GgufRepo = 'unsloth/Qwen3.5-4B-GGUF'
-$GgufFile = 'Qwen3.5-4B-Q8_0.gguf'
+# default cleanup model: the LocalFlow fine-tune, a release asset of this repo (same pin as localflow/modeldl.py)
+$ModelTag    = 'v1.2.0'
+$ModelFile   = 'LFM3-1.7B-LocalFlow-r1e3-Q8_0.gguf'
+$ModelSha256 = 'd7581422f333d2aef23118966a14c6f9363f2e6c6316d39b79c8535efc070e16'
+$ModelUrl    = "https://github.com/AverWasTaken/localflow/releases/download/$ModelTag/$ModelFile"
+$QwenRepo = 'unsloth/Qwen3.5-4B-GGUF'     # optional (-WithQwen)
+$QwenFile = 'Qwen3.5-4B-Q8_0.gguf'
 $WhisperGpu = 'h2oai/faster-whisper-large-v3-turbo'
 $WhisperCpu = 'Systran/faster-whisper-small.en'
 if ($env:LOCALFLOW_TEST_BAD_SHA256 -eq '1') {   # test hook: makes every checksum check fail
     $UvSha256 = '0' * 64
+    $ModelSha256 = '0' * 64
     foreach ($k in @($LlamaAssets.Keys)) { $LlamaAssets[$k] = '0' * 64 }
 }
 
@@ -157,12 +164,13 @@ function Install-LocalFlow {
     if (-not $script:hasGpu) {
         Warn 'No NVIDIA GPU / driver found (nvidia-smi is missing or failed).'
         Write-Host '  LocalFlow will still run, on the CPU: speech-to-text drops to the small.en model (int8) and'
-        Write-Host '  the AI cleanup step is switched off in a fresh config (a 4B model on CPU is too slow to be useful;'
+        Write-Host '  the AI cleanup step is switched off in a fresh config (the cleanup model is too slow on a CPU;'
         Write-Host '  a built-in regex cleaner handles fillers and punctuation instead). Dictation will be slower than on a GPU.'
     }
 
     $venvPy = Join-Path $root '.venv\Scripts\python.exe'
-    $gguf = Join-Path $root "models\$GgufFile"
+    $gguf = Join-Path $root "models\$ModelFile"
+    $qwenGguf = Join-Path $root "models\$QwenFile"
     $llamaDir = Join-Path $binDir 'llama'
     $hfHub = if ($env:HF_HUB_CACHE) { $env:HF_HUB_CACHE } elseif ($env:HF_HOME) { Join-Path $env:HF_HOME 'hub' } `
              else { Join-Path $env:USERPROFILE '.cache\huggingface\hub' }
@@ -173,7 +181,8 @@ function Install-LocalFlow {
     $need = 0.5
     if (-not (Test-Path $venvPy)) { $need += 4 } else { $need += 1 }
     if ((Get-LlamaBuild $llamaDir) -ne $LlamaTag) { $need += 2 }
-    if (-not $SkipModel -and -not (Test-Path $gguf)) { $need += 5 }
+    if (-not $SkipModel -and -not (Test-Path $gguf)) { $need += 2 }
+    if ($WithQwen -and -not (Test-Path $qwenGguf)) { $need += 5 }
     $ttsReady = (Test-Path (Join-Path $root '.venv-tts\localflow-tts.txt')) -and
                 (Test-Path (Join-Path $root 'models\tts\Qwen3-TTS-12Hz-0.6B-CustomVoice\model.safetensors'))
     # spoken answers are optional: too little space for them skips them instead of failing the whole setup
@@ -309,15 +318,28 @@ function Install-LocalFlow {
     }
 
     # ------------------------------------------------------------ models
+    $modelsDir = Join-Path $root 'models'
     if ($SkipModel) {
-        if (-not (Test-Path $gguf)) { Write-Host "`nSkipping the cleanup model (-SkipModel). AI cleanup needs a .gguf model in $(Join-Path $root 'models')." }
+        if (-not (Test-Path $gguf)) { Write-Host "`nSkipping the cleanup model (-SkipModel). LocalFlow downloads it (about 1.8 GB) the first time it starts with AI cleanup on." }
     } elseif (-not (Test-Path $gguf)) {
-        Step 'Downloading the cleanup model (Qwen3.5-4B Q8_0, about 4.5 GB)'
-        New-Item -ItemType Directory -Force (Join-Path $root 'models') | Out-Null
-        Invoke-Direct $venvPy @('-c', 'import sys; from huggingface_hub import hf_hub_download as d; print(d(sys.argv[1], sys.argv[2], local_dir=sys.argv[3]))',
-                                $GgufRepo, $GgufFile, (Join-Path $root 'models')) 'Cleanup model download'
-        if (-not (Test-Path $gguf)) { throw "Expected $gguf after the download but it is not there." }
+        Step 'Downloading the cleanup model (LFM3 1.7B LocalFlow fine-tune, about 1.8 GB)'
+        New-Item -ItemType Directory -Force $modelsDir | Out-Null
+        # not fatal: the app downloads (and checks) the same file on its first start if this one fails
+        try { Get-Verified $ModelUrl $gguf $ModelSha256 }
+        catch {
+            Warn "The cleanup model was not downloaded: $($_.Exception.Message)"
+            Write-Host '  Setup goes on: LocalFlow downloads the model on its first start instead (dictation works meanwhile with basic cleanup).'
+        }
     } else { Write-Host 'Cleanup model: ok' }
+    if ($WithQwen) {
+        if (-not (Test-Path $qwenGguf)) {
+            Step 'Downloading Qwen3.5-4B Q8_0 (optional cleanup model, about 4.5 GB)'
+            New-Item -ItemType Directory -Force $modelsDir | Out-Null
+            Invoke-Direct $venvPy @('-c', 'import sys; from huggingface_hub import hf_hub_download as d; print(d(sys.argv[1], sys.argv[2], local_dir=sys.argv[3]))',
+                                    $QwenRepo, $QwenFile, $modelsDir) 'Qwen model download'
+            if (-not (Test-Path $qwenGguf)) { throw "Expected $qwenGguf after the download but it is not there." }
+        } else { Write-Host 'Qwen3.5-4B model: ok' }
+    }
 
     if ($script:hasGpu) { Step 'Fetching the speech model (large-v3-turbo, about 1.6 GB; skipped if already cached)' }
     else { Step 'Fetching the CPU speech model (small.en, about 0.5 GB; skipped if already cached)' }
