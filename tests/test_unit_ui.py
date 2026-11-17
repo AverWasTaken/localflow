@@ -131,8 +131,25 @@ class Window(unittest.TestCase):
         self.assertFalse(cfg.get("command_mode.enabled"))
         self.assertEqual(cfg.get("command_mode.hotkey"), "ctrl+win")
 
+    def test_answer_questions_switch(self):
+        cfg, w = self.make()
+        w.reload()
+        self.assertTrue(w.ask_sw.isChecked())
+        self.assertTrue(w.ask_sw.isEnabled())
+        w.ask_sw.setChecked(False)
+        self.assertTrue(w.save())
+        self.assertFalse(cfg.get("command_mode.answer_questions"))
+        self.assertEqual(cfg.get("command_mode.answer_max_tokens"), 256)      # not in the UI, untouched
+        w.cmd_sw.setChecked(False)
+        self.assertFalse(w.ask_sw.isEnabled())                              # follows the command mode switch
+        cfg.set("command_mode.answer_questions", True, save=False)
+        cfg.set("command_mode.enabled", True, save=False)
+        w.reload()
+        self.assertTrue(w.ask_sw.isChecked())
+        self.assertTrue(w.ask_sw.isEnabled())
+
     def test_new_settings_save(self):
-        devs = {"inputs": ["Mic A"], "outputs": ["Phones B"], "default_input": "Mic A", "default_output": "Phones B"}
+        devs ={"inputs": ["Mic A"], "outputs": ["Phones B"], "default_input": "Mic A", "default_output": "Phones B"}
         cfg, w = self.make(get_devices=lambda: devs)
         w.reload()
         for k, cb in w.cmd_boxes.items():

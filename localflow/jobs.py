@@ -804,7 +804,8 @@ class TranscriptService:
                  db_path: Optional[Path] = None, recordings_root: Optional[Path] = None,
                  base_url_fn: Optional[Callable[[], str]] = None,
                  llm_ready_fn: Optional[Callable[[], bool]] = None,
-                 request_extra_fn: Optional[Callable[[], dict]] = None):
+                 request_extra_fn: Optional[Callable[[], dict]] = None,
+                 reasoning_budget_fn: Optional[Callable[[], int]] = None):
         from .assistant import Assistant
         self.cfg = cfg
         self.on_progress = on_progress
@@ -823,8 +824,10 @@ class TranscriptService:
             def llm_ready_fn():
                 s = cleaner.server
                 return bool(s.ready) and not bool(getattr(s, "suspended", False))
+        if reasoning_budget_fn is None:
+            reasoning_budget_fn = getattr(cleaner, "reasoning_budget", None)
         self.assistant = Assistant(cfg.get, gate, self.store, base_url_fn, llm_ready_fn,
-                                   request_extra_fn=request_extra_fn)
+                                   request_extra_fn=request_extra_fn, reasoning_budget_fn=reasoning_budget_fn)
         self._ask_lock = threading.Lock()
         self._meeting_lock = threading.Lock()
         self._asks: set = set()

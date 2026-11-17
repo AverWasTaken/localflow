@@ -15,7 +15,7 @@ import time
 from PySide6.QtCore import (QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, QTimer,
                             QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath,
-                           QPen)
+                           QPen, QTextLayout, QTextOption)
 from PySide6.QtWidgets import QApplication, QWidget
 
 try:  # Windows only; everything degrades gracefully without it
@@ -25,14 +25,37 @@ try:  # Windows only; everything degrades gracefully without it
 except Exception:  # pragma: no cover
     win32api = win32con = win32gui = None
 
-VALID_STATES = ("hidden", "recording", "handsfree", "processing", "error", "info")
+VALID_STATES = ("hidden", "recording", "handsfree", "processing", "error", "info", "answer")
 
 PILL_H = 38.0
 MARGIN = 22.0            # transparent canvas margin around the pill (room for the shadow)
 MAX_PILL_W = 360.0
-CANVAS_W = int(MAX_PILL_W + 2 * MARGIN)
-CANVAS_H = int(PILL_H + 2 * MARGIN)
-BOTTOM_OFFSET = 48       # px between pill bottom and bottom of the work area
+BOTTOM_OFFSET = 48       # px between the resting pill's bottom and the bottom of the work area
+
+# answer card (command mode questions): sits under the pill; the pill lifts to make room
+CARD_MIN_W = 220.0
+CARD_MAX_W = 440.0
+CARD_MAX_H = 176.0       # padding + question line + 6 answer lines (Segoe needs ~170) + headroom
+CARD_R = 14.0
+CARD_PAD_X = 16.0
+CARD_PAD_T = 12.0
+CARD_PAD_B = 14.0
+CARD_Q_GAP = 5.0         # question line -> answer
+CARD_LINE_EXTRA = 2.0    # extra leading between answer lines
+CARD_MAX_LINES = 6
+CARD_Q_MAX_W = 280.0     # a long question may widen the card only this far (text area)
+CARD_GAP = 8.0           # pill bottom -> card top when lifted
+CARD_RISE = 8.0          # the card rises this many px into place
+LIFT_IN_MS = 280
+LIFT_OUT_MS = 200
+SWAP_MS = 240
+ANSWER_LABEL = "Answer"
+ANSWER_DEFAULT_MS = 6000
+
+# fixed transparent canvas; anchored by its bottom so the resting pill never moves on screen
+CANVAS_W = int(max(MAX_PILL_W, CARD_MAX_W) + 2 * MARGIN)
+CANVAS_H = int(MARGIN + PILL_H + CARD_GAP + CARD_MAX_H + MARGIN)
+REST_Y = CANVAS_H - MARGIN - PILL_H     # pill top (canvas coords) when not lifted
 N_BARS = 24
 SCROLL_PERIOD = 0.045    # seconds per bar step
 
@@ -51,7 +74,7 @@ _HWND_TOPMOST = -1
 _SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOZORDER, _SWP_NOACTIVATE, _SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x10, 0x20
 
 # colours follow palette.py (accent blue, light accent, recording red)
-from .palette import OVERLAY_ACCENT, OVERLAY_LIGHT, REC  # noqa: E402
+from .palette import OVERLAY_ACCENT, OVERLAY_LIGHT, REC, TEXT, TEXT2  # noqa: E402
 
 ACCENT_C = QColor(OVERLAY_ACCENT)   # hands-free wave start, info dot
 LIGHT_C = QColor(OVERLAY_LIGHT)     # hands-free wave end, processing dots
@@ -62,6 +85,14 @@ REC_RED = QColor(REC)
 
 def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
+
+
+def _out_cubic(x: float) -> float:
+    return 1.0 - (1.0 - x) ** 3
+
+
+def _in_out_cubic(x: float) -> float:
+    return 4.0 * x ** 3 if x < 0.5 else 1.0 - (-2.0 * x + 2.0) ** 3 / 2.0
 
 
 def _compress(raw: float) -> float:
@@ -90,8 +121,21 @@ class _User32:
         self.pos.restype = ctypes.c_int
 
 
+class _Card:
+    """Laid-out answer card, kept as plain strings so an outgoing card paints from its own state."""
+    __slots__ = ("question", "answer", "w", "h", "q_line", "lines", "text_a")
+
+    def __init__(self, question: str, answer: str, w: float, h: float, q_line: str, lines: list,
+                 text_a: float = 1.0):
+        self.question, self.answer = question, answer
+        self.w, self.h = w, h
+        self.q_line, self.lines = q_line, lines
+        self.text_a = text_a       # < 1 only for a card frozen mid-swap
+
+
 class Overlay(QWidget):
     _sig_state = Signal(str, str)
+    _sig_answer = Signal(str, str, int)
     _sig_reposition = Signal()
 
     def __init__(self):
@@ -129,6 +173,20 @@ class Overlay(QWidget):
         self._label_font = QFont(self._font)
         self._label_font.setPointSizeF(8.5)
         self._label_font.setWeight(QFont.Weight.Normal)
+        self._q_font = QFont(self._label_font)          # answer card: question echo
+        self._a_font = QFont(self._font)                # answer card: the answer
+        self._a_font.setPointSizeF(10.5)
+        self._a_font.setWeight(QFont.Weight.Normal)
+
+        # answer card
+        self._card = None          # current _Card (kept while it collapses / fades out)
+        self._card_prev = None     # outgoing _Card during a swap
+        self._lift = 0.0           # pill lift: 0 = at rest, 1 = raised above the card
+        self._card_a = 0.0         # card opacity
+        self._card_rise = CARD_RISE  # px the card still sits below its resting place
+        self._lift_dir = "in"
+        self._lift_from = (0.0, 0.0, CARD_RISE)
+        self._swap = 1.0           # 0 -> 1 swap from _card_prev to _card (linear progress)
 
         # --- timers / animations ---
         self._frame = QTimer(self)
@@ -148,7 +206,18 @@ class Overlay(QWidget):
         self._wanim.setEasingCurve(QEasingCurve.OutCubic)
         self._wanim.valueChanged.connect(self._on_width)
 
+        self._lanim = QVariantAnimation(self)    # pill lift + card reveal / collapse
+        self._lanim.valueChanged.connect(self._on_lift)
+        self._lanim.finished.connect(self._lift_finished)
+
+        self._xanim = QVariantAnimation(self)    # answer -> answer swap
+        self._xanim.setDuration(SWAP_MS)
+        self._xanim.setEasingCurve(QEasingCurve.Linear)     # curves applied in _card_size / _swap_alphas
+        self._xanim.valueChanged.connect(self._on_swap)
+        self._xanim.finished.connect(self._swap_finished)
+
         self._sig_state.connect(self._apply_state)
+        self._sig_answer.connect(self._apply_answer)
         self._sig_reposition.connect(self._do_reposition)
 
         # create the native window now so we can set the Win32 styles before first show
@@ -157,10 +226,19 @@ class Overlay(QWidget):
 
     # ------------------------------------------------------------------ public API
     def set_state(self, state: str, text: str = "") -> None:
-        """Thread-safe. state: hidden|recording|handsfree|processing|error|info.
+        """Thread-safe. state: hidden|recording|handsfree|processing|error|info|answer.
         For recording/handsfree/processing, ``text`` is an optional small label shown in the pill ("casual · Discord",
-        "Command", "Working…")."""
+        "Command", "Working…"). Any state other than "answer" collapses a visible answer card."""
         self._sig_state.emit(str(state), str(text))
+
+    def show_answer(self, question: str, answer: str, duration_ms: int) -> None:
+        """Thread-safe. Show ``answer`` in a card under the pill (``question`` as a muted line above it) and hide
+        after ``duration_ms``. Works from hidden, and replaces a card that is already showing."""
+        try:
+            ms = int(duration_ms)
+        except Exception:
+            ms = ANSWER_DEFAULT_MS
+        self._sig_answer.emit(str(question or ""), str(answer or ""), ms)
 
     def push_level(self, level: float) -> None:
         """Thread-safe, lock-free. level = raw RMS (0..1) of the latest audio block."""
@@ -234,7 +312,7 @@ class Overlay(QWidget):
             return
         av = scr.availableGeometry()
         x = av.x() + (av.width() - CANVAS_W) // 2
-        y = av.y() + av.height() - BOTTOM_OFFSET - int(PILL_H) - int(MARGIN)
+        y = av.y() + av.height() - BOTTOM_OFFSET + int(MARGIN) - CANVAS_H   # resting pill bottom 48px up
         if self.x() != x or self.y() != y:
             self.move(x, y)
 
@@ -265,12 +343,77 @@ class Overlay(QWidget):
     def _apply_state(self, state: str, text: str) -> None:
         if state not in VALID_STATES:
             return
+        if state == "answer":                    # bare set_state("answer", text): a card without a question line
+            self._apply_answer("", text, ANSWER_DEFAULT_MS)
+            return
         self._auto.stop()
         if state == "hidden":
-            self._begin_hide()
+            self._begin_hide()                   # a card fades out with the window
             return
         if state in ("error", "info") and not text:
             text = "Error" if state == "error" else ""
+        self._collapse_card()
+        self._enter(state, text)
+        if state == "error":
+            self._auto.start(int(ERROR_SECS * 1000))
+        elif state == "info":
+            self._auto.start(int(INFO_SECS * 1000))
+
+    def _apply_answer(self, question: str, answer: str, duration_ms: int) -> None:
+        answer = " ".join(str(answer).split())
+        question = " ".join(str(question).split())
+        if not answer:
+            return
+        self._auto.stop()
+        card = self._layout_card(question, answer)
+        if self.isVisible() and self._card is not None and (self._lift > 0.01 or self._card_a > 0.01):
+            # replace: old text fades out, the card (and the pill above it) eases to the new size, new text fades in
+            self._card_prev = self._snapshot_card()
+            self._card = card
+            self._xanim.stop()
+            self._swap = 0.0
+            self._xanim.setStartValue(0.0)
+            self._xanim.setEndValue(1.0)
+            self._xanim.start()
+        else:
+            self._xanim.stop()
+            self._card_prev = None
+            self._card = card
+            self._swap = 1.0
+            self._lift, self._card_a, self._card_rise = 0.0, 0.0, CARD_RISE
+        self._enter("answer", ANSWER_LABEL)
+        if self._lift < 1.0 or self._card_a < 1.0 or self._lanim.state() == QVariantAnimation.Running:
+            self._start_lift("in")
+        self._auto.start(max(1000, int(duration_ms)))
+
+    def _collapse_card(self) -> None:
+        """A non-answer state arrived: fade the card out and glide the pill back down."""
+        if self._card is not None and self._swap < 1.0:
+            self._xanim.stop()
+            self._card = self._snapshot_card()   # freeze what is on screen right now
+            self._card_prev = None
+            self._swap = 1.0
+        running = self._lanim.state() == QVariantAnimation.Running
+        if self._lift <= 0.0 and self._card_a <= 0.0 and not running:
+            return
+        if running and self._lift_dir == "out":
+            return
+        self._start_lift("out")
+
+    def _start_lift(self, direction: str) -> None:
+        """One linear 0->1 progress drives the pill lift and the card fade/rise (curves in _on_lift).
+        Starts from whatever is on screen, so reversing mid-way never jumps."""
+        self._lanim.stop()
+        self._lift_dir = direction
+        self._lift_from = (self._lift, self._card_a, self._card_rise)
+        self._lanim.setDuration(LIFT_IN_MS if direction == "in" else LIFT_OUT_MS)
+        self._lanim.setEasingCurve(QEasingCurve.Linear)
+        self._lanim.setStartValue(0.0)
+        self._lanim.setEndValue(1.0)
+        self._lanim.start()
+
+    def _enter(self, state: str, text: str) -> None:
+        """Show the pill in ``state``, fading the window in if needed."""
         was_visible = self.isVisible() and not self._hiding and self.windowOpacity() > 0.02
         prev = self._mode if was_visible else None
         self._state = state
@@ -314,10 +457,6 @@ class Overlay(QWidget):
                 self._frame.start()
         else:
             self._frame.stop()
-        if state == "error":
-            self._auto.start(int(ERROR_SECS * 1000))
-        elif state == "info":
-            self._auto.start(int(INFO_SECS * 1000))
         self.update()
 
     def _begin_hide(self) -> None:
@@ -342,10 +481,125 @@ class Overlay(QWidget):
             self.hide()
             self.setWindowOpacity(0.0)
             self._levels.clear()
+            self._lanim.stop()
+            self._xanim.stop()
+            self._lift, self._card_a, self._card_rise = 0.0, 0.0, CARD_RISE
+            self._swap = 1.0
+            self._card = self._card_prev = None
 
     def _on_width(self, v) -> None:
         self._pw = float(v)
         self.update()
+
+    def _on_lift(self, v) -> None:
+        """Sequenced so the pill never slides across a visible card.
+        in:  the pill glides up over the first 60% (OutCubic); the card fades in and rises CARD_RISE px from 35%.
+        out: the card fades and sinks over the first 40%; the pill glides down from 25% (InOutCubic)."""
+        u = max(0.0, min(1.0, float(v)))
+        l0, a0, r0 = self._lift_from
+        if self._lift_dir == "in":
+            self._lift = l0 + (1.0 - l0) * _out_cubic(min(1.0, u / 0.6))
+            delay = 0.35 * (1.0 - a0)
+            c = max(0.0, min(1.0, (u - delay) / (1.0 - delay)))
+            self._card_a = a0 + (1.0 - a0) * c
+            self._card_rise = r0 * (1.0 - _out_cubic(c))
+        else:
+            f = min(1.0, u / 0.4)
+            self._card_a = a0 * (1.0 - f)
+            self._card_rise = r0 + (CARD_RISE - r0) * f
+            delay = 0.25 * a0
+            m = max(0.0, min(1.0, (u - delay) / (1.0 - delay)))
+            self._lift = l0 * (1.0 - _in_out_cubic(m))
+        self.update()
+
+    def _lift_finished(self) -> None:
+        if self._lift_dir == "out" and self._mode != "answer":
+            self._card = self._card_prev = None
+            self.update()
+
+    def _on_swap(self, v) -> None:
+        self._swap = float(v)
+        self.update()
+
+    def _swap_finished(self) -> None:
+        self._swap = 1.0
+        self._card_prev = None
+        self.update()
+
+    # ------------------------------------------------------------------ answer card layout
+    def _layout_card(self, question: str, answer: str) -> _Card:
+        qfm = QFontMetricsF(self._q_font)
+        afm = QFontMetricsF(self._a_font)
+        max_in = CARD_MAX_W - 2 * CARD_PAD_X
+        min_in = CARD_MIN_W - 2 * CARD_PAD_X
+        q_want = min(CARD_Q_MAX_W, qfm.horizontalAdvance(question) + 1.0) if question else 0.0
+        inner = max(min_in, min(max_in, math.ceil(max(q_want, afm.horizontalAdvance(answer) + 1.0))))
+
+        # as many answer lines as the fixed canvas allows (never more than CARD_MAX_LINES)
+        line_h = afm.lineSpacing() + CARD_LINE_EXTRA
+        q_block = (qfm.height() + CARD_Q_GAP) if question else 0.0
+        room = CARD_MAX_H - CARD_PAD_T - CARD_PAD_B - q_block
+        max_lines = max(1, min(CARD_MAX_LINES, int((room - afm.height()) // line_h) + 1))
+        lines = self._wrap(answer, inner, max_lines)
+        q_line = qfm.elidedText(question, Qt.ElideRight, int(inner)) if question else ""
+        h = CARD_PAD_T + q_block + afm.height() + (len(lines) - 1) * line_h + CARD_PAD_B
+        return _Card(question, answer, inner + 2 * CARD_PAD_X, min(CARD_MAX_H, float(math.ceil(h))), q_line, lines)
+
+    def _wrap(self, text: str, width: float, max_lines: int) -> list:
+        afm = QFontMetricsF(self._a_font)
+        layout = QTextLayout(text, self._a_font)
+        opt = QTextOption()
+        opt.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(opt)
+        u16 = text.encode("utf-16-le", "surrogatepass")  # QTextLayout offsets count UTF-16 units (emoji = 2)
+
+        def part(start: int, n: int | None = None) -> str:
+            end = len(u16) if n is None else 2 * (start + n)
+            return u16[2 * start:end].decode("utf-16-le", "surrogatepass")
+
+        layout.beginLayout()
+        out = []
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(width)
+            start = line.textStart()
+            if len(out) == max_lines - 1:          # last allowed line: take the rest, elide it
+                out.append(afm.elidedText(part(start).strip(), Qt.ElideRight, int(width)))
+                break
+            out.append(part(start, line.textLength()).rstrip())
+        layout.endLayout()
+        return [ln for ln in out if ln] or [afm.elidedText(text, Qt.ElideRight, int(width))]
+
+    def _snapshot_card(self):
+        """The card as drawn right now: mid-swap, the more visible text at the interpolated size."""
+        c = self._card
+        if c is None or self._card_prev is None or self._swap >= 1.0:
+            return c
+        w, h = self._card_size()
+        old_a, new_a = self._swap_alphas()
+        t, a = (c, new_a) if new_a >= old_a else (self._card_prev, old_a)
+        return _Card(t.question, t.answer, w, h, t.q_line, t.lines, a * t.text_a)
+
+    def _swap_alphas(self) -> tuple:
+        """Old text fades out over the first 40% of a swap, new text fades in over the last 65%."""
+        s = self._swap
+        return 1.0 - min(1.0, s / 0.4), max(0.0, min(1.0, (s - 0.35) / 0.65))
+
+    def _card_size(self) -> tuple:
+        c, pv = self._card, self._card_prev
+        if c is None:
+            return 0.0, 0.0
+        if pv is None or self._swap >= 1.0:
+            return c.w, c.h
+        k = _out_cubic(self._swap)
+        return _lerp(pv.w, c.w, k), _lerp(pv.h, c.h, k)
+
+    def _pill_y(self) -> float:
+        if self._card is None or self._lift <= 0.0:
+            return float(REST_Y)
+        return REST_Y - self._lift * (self._card_size()[1] + CARD_GAP)
 
     def _reset_wave(self) -> None:
         self._hist = collections.deque([0.0] * N_BARS, maxlen=N_BARS)
@@ -396,10 +650,19 @@ class Overlay(QWidget):
         mode = self._mode
         pw = self._pw
         x0 = (CANVAS_W - pw) / 2.0
-        rect = QRectF(x0, MARGIN, pw, PILL_H)
+        rect = QRectF(x0, self._pill_y(), pw, PILL_H)
         t = time.perf_counter() - self._t0
 
+        card_rect, card_a = self._card_geometry()
+        if card_rect is not None:              # both shadows first, so neither smudges the other body
+            p.setOpacity(card_a)
+            self._paint_shadow(p, card_rect, mode, CARD_R)
+            p.setOpacity(1.0)
         self._paint_shadow(p, rect, mode)
+        if card_rect is not None:
+            p.setOpacity(card_a)
+            self._paint_card(p, card_rect)
+            p.setOpacity(1.0)
         self._paint_pill(p, rect, mode)
 
         if mode in ("recording", "handsfree"):
@@ -422,11 +685,11 @@ class Overlay(QWidget):
                 self._paint_dots(p, rect, t)
         elif mode == "error":
             self._paint_error(p, rect)
-        elif mode == "info":
+        elif mode in ("info", "answer"):
             self._paint_info(p, rect)
         p.end()
 
-    def _paint_shadow(self, p: QPainter, rect: QRectF, mode: str) -> None:
+    def _paint_shadow(self, p: QPainter, rect: QRectF, mode: str, radius: float = PILL_H / 2) -> None:
         p.setPen(Qt.NoPen)
         layers = 9
         for i in range(layers):
@@ -434,7 +697,7 @@ class Overlay(QWidget):
             a = 3 + i * 0.6
             r = rect.adjusted(-grow, -grow + 3, grow, grow + 3)
             p.setBrush(QColor(0, 0, 0, int(a)))
-            p.drawRoundedRect(r, PILL_H / 2 + grow, PILL_H / 2 + grow)
+            p.drawRoundedRect(r, radius + grow, radius + grow)
 
     def _paint_pill(self, p: QPainter, rect: QRectF, mode: str) -> None:
         if mode == "error":
@@ -453,6 +716,59 @@ class Overlay(QWidget):
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(border, 1.0))
         p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), PILL_H / 2 - 0.5, PILL_H / 2 - 0.5)
+
+    # ------------------------------------------------------------------ answer card painting
+    def _card_geometry(self) -> tuple:
+        """Card rect (canvas coords) and opacity for the current lift, or (None, 0) when nothing shows."""
+        alpha = max(0.0, min(1.0, self._card_a))
+        if self._card is None or alpha <= 0.001:
+            return None, 0.0
+        w, h = self._card_size()
+        bottom = CANVAS_H - MARGIN + self._card_rise
+        return QRectF((CANVAS_W - w) / 2.0, bottom - h, w, h), alpha
+
+    def _paint_card(self, p: QPainter, rect: QRectF) -> None:
+        # same surface as the neutral pill: graphite gradient + hairline
+        g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        g.setColorAt(0, QColor(32, 33, 37, 238))
+        g.setColorAt(1, QColor(22, 23, 26, 238))
+        p.setBrush(g)
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(rect, CARD_R, CARD_R)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
+        p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_R - 0.5, CARD_R - 0.5)
+
+        clip = QPainterPath()
+        clip.addRoundedRect(rect.adjusted(1, 1, -1, -1), CARD_R - 1, CARD_R - 1)
+        p.save()
+        p.setClipPath(clip)
+        base = p.opacity()
+        new_a = 1.0
+        if self._card_prev is not None and self._swap < 1.0:
+            old_a, new_a = self._swap_alphas()
+            if old_a > 0.0:
+                p.setOpacity(base * old_a * self._card_prev.text_a)
+                self._paint_card_text(p, rect, self._card_prev)
+        p.setOpacity(base * new_a * self._card.text_a)
+        self._paint_card_text(p, rect, self._card)
+        p.restore()
+
+    def _paint_card_text(self, p: QPainter, rect: QRectF, card: _Card) -> None:
+        qfm = QFontMetricsF(self._q_font)
+        afm = QFontMetricsF(self._a_font)
+        x = rect.left() + CARD_PAD_X
+        y = rect.top() + CARD_PAD_T
+        if card.q_line:
+            p.setFont(self._q_font)
+            p.setPen(QColor(TEXT2))
+            p.drawText(QPointF(x, y + qfm.ascent()), card.q_line)
+            y += qfm.height() + CARD_Q_GAP
+        p.setFont(self._a_font)
+        p.setPen(QColor(TEXT))
+        line_h = afm.lineSpacing() + CARD_LINE_EXTRA
+        for i, ln in enumerate(card.lines):
+            p.drawText(QPointF(x, y + afm.ascent() + i * line_h), ln)
 
     def _paint_rec_dot(self, p: QPainter, rect: QRectF, t: float) -> None:
         c = QPointF(rect.left() + 20, rect.center().y())
@@ -557,7 +873,7 @@ class Overlay(QWidget):
     def _paint_label(self, p: QPainter, rect: QRectF, lw: float) -> None:
         """Small muted style label at the right end of the recording pill."""
         p.setFont(self._label_font)
-        p.setPen(QColor(190, 190, 205))
+        p.setPen(QColor(222, 224, 232))
         box = QRectF(rect.right() - 16 - (lw - 12.0), rect.top(), lw - 12.0, rect.height())
         txt = QFontMetricsF(self._label_font).elidedText(self._text, Qt.ElideRight, int(box.width()))
         p.drawText(box, int(Qt.AlignVCenter | Qt.AlignRight), txt)
@@ -577,7 +893,11 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     ov = Overlay()
     seq = [("recording", ""), ("handsfree", ""), ("processing", ""), ("error", "Microphone not found"),
-           ("info", "Paused"), ("recording", ""), ("hidden", "")]
+           ("info", "Paused"), ("recording", "Command"), ("processing", "Working…"),
+           ("answer", "How many hours is it from 7:30am to 5pm?", "9 hours 30 minutes (9.5 hours)"),
+           ("answer", "Who wrote Pride and Prejudice?",
+            "Jane Austen. It was published in 1813 as her second novel, after Sense and Sensibility."),
+           ("recording", ""), ("hidden", "")]
     stop = False
 
     def feeder():  # simulates the audio thread
@@ -597,9 +917,13 @@ if __name__ == "__main__":
             stop = True
             app.quit()
             return
-        s, tx = seq[idx[0]]
+        s, *args = seq[idx[0]]
         print("state:", s)
-        threading.Thread(target=ov.set_state, args=(s, tx), daemon=True).start()
+        if s == "answer":
+            q, a = args
+            threading.Thread(target=ov.show_answer, args=(q, a, 6000), daemon=True).start()
+        else:
+            threading.Thread(target=ov.set_state, args=(s, args[0]), daemon=True).start()
         idx[0] += 1
 
     timer = QTimer()

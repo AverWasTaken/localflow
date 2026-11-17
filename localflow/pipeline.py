@@ -105,16 +105,23 @@ class Pipeline:
         if insert:
             t_ins = time.perf_counter()
             try:
-                self.inserter(text, mode=cfg.get("insert.mode", "paste"),
-                              restore=bool(cfg.get("insert.restore_clipboard", True)),
-                              restore_delay_ms=int(cfg.get("insert.restore_delay_ms", 300)))
+                ins = self.inserter(text, mode=cfg.get("insert.mode", "paste"),
+                                    restore=bool(cfg.get("insert.restore_clipboard", True)),
+                                    restore_delay_ms=int(cfg.get("insert.restore_delay_ms", 300)))
+                if isinstance(ins, dict):       # no text box focused: copied to the clipboard instead (fieldprobe)
+                    if ins.get("copied"):
+                        r["copied"] = True
+                    if ins.get("copy_failed"):
+                        r["copy_failed"] = True
             except Exception:
                 log.exception("insertion failed")
                 r["status"] = "insert-error"
             r["insert_ms"] = int((time.perf_counter() - t_ins) * 1000)
         # latency to the moment the paste keystroke went out (excludes the deliberate clipboard-restore wait)
         restore_wait = int(cfg.get("insert.restore_delay_ms", 300)) if (insert and cfg.get("insert.mode") == "paste"
-                                                                        and cfg.get("insert.restore_clipboard")) else 0
+                                                                        and cfg.get("insert.restore_clipboard")
+                                                                        and not r.get("copied")
+                                                                        and not r.get("copy_failed")) else 0
         r["total_ms"] = int((time.perf_counter() - t_release) * 1000) - restore_wait
         if insert and r["status"] == "ok" and self.history is not None:
             try:    # usage stats count every successful insert, whatever the history settings are

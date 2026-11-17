@@ -28,6 +28,10 @@ class FakeOverlay:
     def set_state(self, state, text=""):
         self.calls.append((state, text))
 
+    def show_answer(self, question, answer, duration_ms):
+        self.calls.append(("answer", answer))
+        self.answers = getattr(self, "answers", []) + [(question, answer, duration_ms)]
+
     def push_level(self, lvl):
         pass
 
@@ -102,12 +106,37 @@ class FakeService:
         self.shut = True
 
 
+class FakeMuter:
+    """Stands in for outmute.OutputMuter: never touches real speakers."""
+
+    def __init__(self, backend=None, **kw):
+        self.backend, self.kw, self.calls = backend, kw, []
+
+    def arm(self, rid):
+        self.calls.append(("arm", rid))
+
+    def engage(self, rid, delay=0.0):
+        self.calls.append(("engage", rid, delay))
+
+    def release(self, wait=0.15):
+        self.calls.append(("release",))
+        return True
+
+    def recover(self):
+        self.calls.append(("recover",))
+
+    def shutdown(self, wait=1.0):
+        self.calls.append(("shutdown",))
+
+
 class AppWiring(unittest.TestCase):
     def setUp(self):
         d = Path(tempfile.mkdtemp())
         self._saved = {k: getattr(app_mod, k) for k in ("Config", "History", "Overlay", "AudioInput", "Transcriber",
-                                                         "Cleaner", "HotkeyManager", "sounds", "TranscriptService")}
+                                                         "Cleaner", "HotkeyManager", "sounds", "TranscriptService",
+                                                         "OutputMuter")}
         app_mod.TranscriptService = FakeService
+        app_mod.OutputMuter = FakeMuter                 # never mute real speakers from a test
         app_mod.sounds = SimpleNamespace(play=lambda *a, **k: None, ensure_sounds=lambda *a, **k: None)   # silence!
         app_mod.Config = lambda: Config(path=d / "cfg.json")
         app_mod.History = lambda max_entries=5000, **kw: History(path=d / "h.db", max_entries=max_entries, **kw)
@@ -117,12 +146,16 @@ class AppWiring(unittest.TestCase):
         app_mod.Cleaner = FakeCleaner
         app_mod.HotkeyManager = FakeHotkey
         self._fg = app_mod.winutil.foreground_info
+        self._warm = app_mod.fieldprobe.warm
+        self.warm_calls = []
+        app_mod.fieldprobe.warm = lambda: self.warm_calls.append(1)     # no real UIA thread from tests
         self.app = app_mod.LocalFlowApp(None)
 
     def tearDown(self):
         for k, v in self._saved.items():
             setattr(app_mod, k, v)
         app_mod.winutil.foreground_info = self._fg
+        app_mod.fieldprobe.warm = self._warm
         if self.app._session is not None:
             self.app._session.cancel()
 

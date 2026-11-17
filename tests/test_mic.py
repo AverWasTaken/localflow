@@ -8,16 +8,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from localflow.audio import AudioInput
 from localflow.config import Config
 
-for match in ("", "no-such-mic-xyz", *sys.argv[1:]):
-    cfg = Config(path=Path(tempfile.mkdtemp()) / "c.json")
-    cfg.data["mic"]["match"] = match
-    levels = []
-    a = AudioInput(cfg, on_level=levels.append)
-    a.start()
-    time.sleep(0.8)
-    a.begin()
-    time.sleep(2.0)
-    x = a.end()
-    print(f"match={match!r}: device={a.device_name!r} preferred_found={a.preferred_found} "
-          f"captured {len(x)/16000:.2f}s @16k, rms={np.sqrt(np.mean(x**2)):.4f}, peak={np.abs(x).max():.3f}, callbacks={len(levels)}")
-    a.stop()
+def main():
+    for match in ("", "no-such-mic-xyz", *sys.argv[1:]):
+        cfg = Config(path=Path(tempfile.mkdtemp()) / "c.json")
+        cfg.data["mic"]["match"] = match
+        levels = []
+        a = AudioInput(cfg, on_level=levels.append)
+        a.start()
+        time.sleep(0.8)
+        a.begin()
+        time.sleep(2.0)
+        x = a.end()
+        print(f"match={match!r}: device={a.device_name!r} preferred_found={a.preferred_found} "
+              f"captured {len(x)/16000:.2f}s @16k, rms={np.sqrt(np.mean(x**2)):.4f}, peak={np.abs(x).max():.3f}, callbacks={len(levels)}")
+        a.stop()
+
+
+if __name__ == "__main__":     # manual only: unittest discovery imports this file
+    main()

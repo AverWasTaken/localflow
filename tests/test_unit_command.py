@@ -460,6 +460,205 @@ class PasteLast(AppBase):
         self.assertEqual(a._jobs.get_nowait(), ("paste", 99))
 
 
+# ============================================================================ command mode questions (answer card)
+MISROUTE_COMMANDS = ["Could you just shorten this?", "Can you help me rewrite this?", "Would you mind fixing the grammar?",
+                     "Can we make this friendlier?", "Do this in bullet points", "Can you make this more formal?",
+                     "Make it formal", "Translate to German"]
+MISROUTE_QUESTIONS = ["How many hours is it from 7:30am to 5pm?", "What's 15% of 240?", "What does this mean?",
+                      "Is this grammatically correct?", "Can you explain this", "Can you explain this?",
+                      "Who wrote Pride and Prejudice?", "Ask what the capital of France is", "Does this sound rude?"]
+
+
+class QuestionFlow(AppBase):
+    def setUp(self):
+        super().setUp()
+        self.app.cleaner.answer.return_value = ("Jane Austen", {"llm": True, "ms": 9, "reason": ""})
+
+    def say(self, text):
+        self.app.stt.transcribe.return_value = SimpleNamespace(text=text, ms=5, dropped="")
+
+    def test_question_answered_in_overlay_not_inserted(self):
+        a = self.app
+        self.say("Who wrote Pride and Prejudice?")
+        self.speak("command")
+        a.cleaner.command.assert_not_called()
+        a.cleaner.answer.assert_called_once_with("Who wrote Pride and Prejudice?", "", "notepad.exe")
+        self.capture.assert_not_called()                 # the question doesn't refer to any text
+        self.assertEqual(self.inserted, [])
+        self.assertEqual(a.overlay.answers, [("Who wrote Pride and Prejudice?", "Jane Austen", 4000 + 50 * 11)])
+        self.assertEqual(a.overlay.calls[-1], ("answer", "Jane Austen"))     # no "hidden" after the card
+        self.assertEqual(a.last_text, "Jane Austen")     # paste-last inserts the answer
+        h = a.history.list()[0]
+        self.assertEqual((h["style"], h["cleaned"]), ("command", "Jane Austen"))
+        self.assertIn("[answer]", h["raw"])
+        self.assertEqual(a.history.stats()["commands"], 1)
+        self.assertGateIdle()
+
+    def test_quick_answer_path_skips_cleaner_and_capture(self):
+        a = self.app
+        self.say("How many hours is it from 7:30am to 5pm?")
+        self.speak("command")
+        a.cleaner.answer.assert_not_called()
+        a.cleaner.command.assert_not_called()
+        self.capture.assert_not_called()
+        self.assertEqual(a.overlay.answers[0][1], "9 hours 30 minutes (9.5 hours)")
+        self.assertEqual(a.last_text, "9 hours 30 minutes (9.5 hours)")
+        self.assertEqual(self.inserted, [])
+        self.assertGateIdle()
+
+    def test_ask_override_word_dropped(self):
+        self.say("Ask what the capital of France is")
+        self.speak("command")
+        self.app.cleaner.answer.assert_called_once_with("What the capital of France is", "", "notepad.exe")
+        self.assertEqual(self.app.overlay.answers[0][0], "What the capital of France is")
+
+    def test_selection_captured_only_when_referenced(self):
+        a = self.app
+        self.say("What does this mean?")
+        self.speak("command")
+        a.cleaner.answer.assert_called_once_with("What does this mean?", "hey team hi", "notepad.exe")
+        self.assertIn("on selection: 11 chars", a.history.list()[0]["raw"])
+        # any other capture result: answered without the selection, never a failure
+        for st in ("window", "busy", "uncertain", "none"):
+            a.cleaner.answer.reset_mock()
+            self.capture.return_value = (st, "")
+            self.speak("command")
+            a.cleaner.answer.assert_called_once_with("What does this mean?", "", "notepad.exe")
+        self.assertEqual(len(a.overlay.answers), 5)
+        self.assertEqual(self.inserted, [])
+        self.assertGateIdle()
+
+    def test_selection_skipped_when_unsafe(self):
+        a = self.app
+        self.say("What does this mean?")
+        self.mocks[2].return_value = False                # keys still held
+        self.speak("command")
+        self.mocks[2].return_value = True
+        hw = iter([111, 222])                             # key-down, before the copy: window changed
+        self.fg.side_effect = lambda: next(hw)
+        self.speak("command")
+        self.fg.side_effect = None
+        self.mocks[4].return_value = ("code.exe", "x")    # generate-only app
+        self.speak("command")
+        self.capture.assert_not_called()
+        self.assertEqual([c.args[1] for c in a.cleaner.answer.call_args_list], ["", "", ""])
+        self.assertEqual(len(a.overlay.answers), 3)
+        self.assertGateIdle()
+
+    def test_answer_failure_shows_error_inserts_nothing(self):
+        a = self.app
+        a.cleaner.answer.return_value = ("", {"llm": False, "ms": 0, "reason": "AI model not ready"})
+        self.say("Who wrote Pride and Prejudice?")
+        self.speak("command")
+        self.assertIn(("error", "Couldn't answer: AI model not ready"), a.overlay.calls)
+        self.assertEqual(getattr(a.overlay, "answers", []), [])
+        self.assertEqual((self.inserted, a.last_text), ([], ""))
+        self.assertIn("command failed", a.history.list()[0]["cleaned"])
+        self.assertEqual(a.history.stats()["commands"], 0)
+        self.assertGateIdle()
+
+    def test_toggle_off_keeps_old_behavior(self):
+        a = self.app
+        a.cfg.set("command_mode.answer_questions", False, save=False)
+        self.say("What does this mean?")
+        self.speak("command")
+        a.cleaner.answer.assert_not_called()
+        a.cleaner.command.assert_called_once_with("What does this mean?", "hey team hi", "notepad.exe")
+        self.assertEqual(len(self.inserted), 1)
+        self.say("How many hours is it from 7:30am to 5pm?")
+        self.speak("command")
+        self.assertEqual(len(self.inserted), 2)
+        self.assertEqual(getattr(a.overlay, "answers", []), [])
+
+    def test_misroute_table_through_run_command(self):
+        a = self.app
+        for text in MISROUTE_COMMANDS:
+            self.say(text)
+            self.speak("command")
+        self.assertEqual(a.cleaner.command.call_count, len(MISROUTE_COMMANDS))
+        self.assertEqual(len(self.inserted), len(MISROUTE_COMMANDS))
+        self.assertEqual(getattr(a.overlay, "answers", []), [])
+        for text in MISROUTE_QUESTIONS:
+            self.say(text)
+            self.speak("command")
+        self.assertEqual(a.cleaner.command.call_count, len(MISROUTE_COMMANDS))
+        self.assertEqual(len(self.inserted), len(MISROUTE_COMMANDS))
+        self.assertEqual(len(a.overlay.answers), len(MISROUTE_QUESTIONS))
+        self.assertEqual(a.cleaner.answer.call_count, len(MISROUTE_QUESTIONS) - 2)   # 2 answered locally
+        self.assertGateIdle()
+
+    def test_answer_shown_even_with_overlay_off(self):
+        a = self.app
+        a.cfg.set("ui.overlay", False, save=False)
+        self.say("Who wrote Pride and Prejudice?")
+        self.speak("command")
+        self.assertEqual(len(a.overlay.answers), 1)
+
+    def test_late_answer_not_shown_during_new_recording(self):
+        a = self.app
+
+        def answer(*x):
+            a._recording = True                 # the user started another recording while the LLM worked
+            return "Jane Austen", {"llm": True, "ms": 9, "reason": ""}
+        a.cleaner.answer.side_effect = answer
+        self.say("Who wrote Pride and Prejudice?")
+        self.speak("command")
+        a._recording = False
+        self.assertEqual(getattr(a.overlay, "answers", []), [])
+        self.assertEqual(a.last_text, "Jane Austen")
+        self.assertEqual(a.history.list()[0]["cleaned"], "Jane Austen")
+        self.assertEqual(a._answer_until, 0.0)
+        self.assertGateIdle()
+
+    def test_late_answer_not_shown_after_newer_recording_released(self):
+        a = self.app
+
+        def answer(*x):
+            a._rec_id += 1                      # another recording started and was already released
+            return "Jane Austen", {"llm": True, "ms": 9, "reason": ""}
+        a.cleaner.answer.side_effect = answer
+        self.say("Who wrote Pride and Prejudice?")
+        self.speak("command")
+        self.assertEqual(getattr(a.overlay, "answers", []), [])
+        self.assertEqual(a.last_text, "Jane Austen")
+
+    def test_answer_until_set_before_gate_release_and_toasts_wait(self):
+        a = self.app
+        seen = []
+        a.overlay.show_answer = lambda q, ans, ms: seen.append((a.gate.busy(), a._answer_until - time.monotonic(), ms))
+        self.say("Who wrote Pride and Prejudice?")
+        self.speak("command")
+        busy, left, ms = seen[0]
+        self.assertTrue(busy)                                   # gate still held when the card is shown
+        self.assertAlmostEqual(left, ms / 1000.0, delta=0.5)
+        self.assertEqual(ms, min(15000, 4000 + 50 * len("Jane Austen")))
+        self.assertGateIdle()
+        with mock.patch.object(app_mod.QTimer, "singleShot") as ss:
+            a._notify("info", "Model loaded")
+            self.assertNotIn(("info", "Model loaded"), a.overlay.calls)
+            delay = ss.call_args.args[0]
+            self.assertGreater(delay, 4000)                     # re-checked after the card is gone
+            self.assertLess(delay, ms + 1000)
+        a._toast_timer = False
+        a._answer_until = 0.0
+        a._flush_toasts()
+        self.assertIn(("info", "Model loaded"), a.overlay.calls)
+
+    def test_long_answer_duration_capped(self):
+        a = self.app
+        a.cleaner.answer.return_value = ("x" * 1000, {"llm": True, "ms": 9, "reason": ""})
+        self.say("Who wrote Pride and Prejudice?")
+        self.speak("command")
+        self.assertEqual(a.overlay.answers[0][2], 15000)
+
+    def test_new_recording_clears_answer_until(self):
+        a = self.app
+        a._answer_until = time.monotonic() + 10
+        a._do_start("command")
+        self.assertEqual(a._answer_until, 0.0)
+        a._do_cancel("esc")
+
+
 # ============================================================================ history stats + retention
 class Stats(unittest.TestCase):
     def setUp(self):
@@ -586,6 +785,22 @@ class CleanerCommand(unittest.TestCase):
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
         self.assertIn("<selection>\nsome text here\n</selection>", body["messages"][1]["content"])
 
+    def test_raw_reasoning_format_keeps_first_line_indent(self):
+        # llama-server's reasoning parser lstrips content after <think></think>: commands ask for the raw text
+        c = self.make()
+        c.http = SimpleNamespace(post=self.post("<think></think>        return result"))
+        out, info = c.command("fix the typo", "        retrun result", "Code.exe")
+        self.assertEqual(out, "        return result")
+        self.assertEqual(self.bodies[-1][0]["reasoning_format"], "none")
+        c.http = SimpleNamespace(post=self.post("<think></think>\tif x:\n\t\tpass"))
+        out, _ = c.command("indent this by one tab", "if x:\n\tpass", "")
+        self.assertEqual(out, "\tif x:\n\t\tpass")
+        # thinking on: the server must split the reasoning, so the default parser is kept
+        c.cfg.set("cleanup.model_reasoning", {"LFM3-1.7B-Q8_0.gguf": {"enabled": True, "budget": 256}}, save=False)
+        self.assertGreater(c.reasoning_budget(), 0)
+        body, _t, _w = c.command_request("fix the typo", "x", "")
+        self.assertNotIn("reasoning_format", body)
+
     def test_max_tokens_and_generate_only(self):
         c = self.make("models/Qwen3.5-4B-Q8_0.gguf")
         c.http = SimpleNamespace(post=self.post("ok"))
@@ -661,6 +876,30 @@ class CleanerCommand(unittest.TestCase):
         self.assertEqual(t("use New;", "    use Old;", "rename the namespace to new"), "    use New;")   # not "space"
         self.assertEqual(t("x", "    y", "convert tabs to spaces"), "x")
 
+    def test_fence_request_regex(self):
+        r = cleanup._FENCE_REQUEST_RE
+        for ins in ("paste a python snake game here in a code block", "put it in a codeblock", "Code-Block please",
+                    "write it fenced", "use a code fence", "wrap it in a fence", "in triple backticks",
+                    "wrap the result in backticks", "format it as markdown code", "IN A CODE BLOCK", "with ``` around it",
+                    "fence this Python snippet", "fence the result", "fence the whole sql query"):
+            self.assertTrue(r.search(ins), ins)
+        for ins in ("write some python code", "code", "python code for a snake game", "write a function", "fix this code",
+                    "a poem about a white picket fence", "make the code blocky", "put the name in single backticks",
+                    "fence the yard with wood", "they fence in the garden"):
+            self.assertFalse(r.search(ins), ins)
+
+    def test_tidy_keeps_requested_fence(self):
+        t = cleanup.tidy_command_output
+        fenced = "```python\nprint('hi')\n```"
+        self.assertEqual(t(fenced, "", "paste a python snake game here in a code block"), fenced)
+        self.assertEqual(t(fenced, "", "write it in triple backticks"), fenced)
+        self.assertEqual(t(fenced, "", "write some python code"), "print('hi')")
+        self.assertEqual(t(fenced, "x = 1", "rewrite this in python"), "print('hi')")
+        self.assertEqual(t(fenced, "```\nx = 1\n```", "rewrite this"), fenced)
+
+    def test_command_prompt_allows_requested_fence(self):
+        self.assertIn("unless the selection was one or the instruction asks for one", cleanup.COMMAND_SYSTEM_PROMPT)
+
     def test_overrides_cannot_raise_max_tokens(self):
         c = self.make("models/Qwen3.5-4B-Q8_0.gguf")
         c.cfg.set("cleanup.model_request", {"Qwen3.5-4B-Q8_0.gguf": {"max_tokens": 20000, "top_k": 5}}, save=False)
@@ -670,6 +909,80 @@ class CleanerCommand(unittest.TestCase):
         body = self.bodies[-1][0]
         self.assertEqual(body["max_tokens"], 768)
         self.assertEqual(body["top_k"], 5)                      # other per-model extras still apply
+
+
+class CleanerAnswer(unittest.TestCase):
+    make = CleanerCommand.make
+    post = CleanerCommand.post
+    NOW = dt.datetime(2026, 11, 10, 15, 42)
+
+    def test_request_body(self):
+        c = self.make()
+        c.http = SimpleNamespace(post=self.post("<think></think>**About 384,400 km.**"))
+        out, info = c.answer("How far is the moon?", "", "notepad.exe", now=self.NOW)
+        self.assertEqual(out, "About 384,400 km.")
+        self.assertTrue(info["llm"])
+        body, timeout = self.bodies[-1]
+        self.assertEqual(body["messages"][0], {"role": "system", "content": cleanup.ANSWER_SYSTEM_PROMPT})
+        self.assertEqual(body["messages"][1]["content"],
+                         "<now>Tuesday, November 10, 2026, 3:42 PM</now>\n<app>notepad.exe</app>\n"
+                         "<question>How far is the moon?</question>")
+        self.assertEqual(body["max_tokens"], 256)
+        self.assertEqual(timeout, 30.0)
+        self.assertEqual(body["reasoning_format"], "none")
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertFalse(body["stream"])
+        c.cfg.set("command_mode.answer_max_tokens", 100, save=False)
+        c.cfg.set("command_mode.timeout_s", 12, save=False)
+        c.answer("What does this mean?", "carpe\r\ndiem", "", now=dt.datetime(2026, 1, 3, 0, 5))
+        body, timeout = self.bodies[-1]
+        self.assertEqual(body["messages"][1]["content"],
+                         "<now>Saturday, January 3, 2026, 12:05 AM</now>\n<app>unknown</app>\n"
+                         "<question>What does this mean?</question>\n<selection>\ncarpe\ndiem\n</selection>")
+        self.assertEqual((body["max_tokens"], timeout), (100, 12.0))
+
+    def test_answer_prompt(self):
+        p = cleanup.ANSWER_SYSTEM_PROMPT
+        for s in ("<question>", "<now>", "<selection>", "60 words", "no markdown", "not sure"):
+            self.assertIn(s, p)
+        self.assertNotEqual(p, cleanup.COMMAND_SYSTEM_PROMPT)
+
+    def test_failure_reasons(self):
+        c = self.make()
+        c.http = SimpleNamespace(post=self.post("half an ans", finish="length"))
+        self.assertEqual(c.answer("q?")[1]["reason"], "answer too long (cut off)")
+        for empty in ("<think>only thinking", "<think></think>   ", "", "**  **"):
+            c.http = SimpleNamespace(post=self.post(empty))
+            out, info = c.answer("q?")
+            self.assertEqual((out, info["reason"]), ("", "empty answer"), empty)
+
+        def boom(*a, **k):
+            raise cleanup.requests.Timeout("slow")
+        c.http = SimpleNamespace(post=boom)
+        self.assertEqual(c.answer("q?")[1]["reason"], "AI request timed out")
+
+        def refused(*a, **k):
+            raise cleanup.requests.ConnectionError("down")
+        c.http = SimpleNamespace(post=refused)
+        with mock.patch.object(c, "_recover") as rec:
+            out, info = c.answer("q?")
+        self.assertEqual((out, info["reason"]), ("", "error: ConnectionError"))
+        rec.assert_called_once()
+        out, info = c.answer("q?", "x" * 40000)
+        self.assertIn("too long", info["reason"])
+        c.server.suspended = True
+        self.assertIn("game mode", c.answer("q?")[1]["reason"])
+        c.server.suspended = False
+        c.cfg.set("cleanup.enabled", False, save=False)
+        self.assertIn("disabled", c.answer("q?")[1]["reason"])
+
+    def test_not_ready_waits_then_gives_up(self):
+        c = self.make()
+        c.server.ready = False
+        c.server.failed = None
+        with mock.patch.object(cleanup.time, "monotonic", side_effect=[0.0, 0.0, 99.0, 99.0, 99.0]):
+            out, info = c.answer("q?")
+        self.assertEqual((out, info["reason"]), ("", "AI model not ready"))
 
 
 # ============================================================================ inserter strict paths (mocked Win32)

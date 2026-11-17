@@ -8,28 +8,30 @@ already relies on: red = recording, amber = busy, teal = game mode.
 """
 
 # surfaces, darkest to lightest
-BG = "#16171a"            # window background
-SIDEBAR = "#1b1c20"       # sidebar + bottom bar
-SURFACE = "#202125"       # panels, setting groups
-SURFACE2 = "#2a2b30"      # controls (buttons, combos)
-SURFACE3 = "#34353b"      # control hover
-BORDER = "#2f3035"        # hairlines
-BORDER_STRONG = "#3f4148" # control borders on hover, popups
+BG = "#0f1013"            # window background (content area)
+SIDEBAR = "#131418"       # sidebar
+SURFACE = "#17181c"       # panels, setting groups, reader
+SURFACE2 = "#1f2025"      # controls (buttons, combos), selected nav item
+SURFACE3 = "#282a30"      # control hover
+BORDER = "#24262b"        # hairlines, card outlines
+BORDER_STRONG = "#31333a" # control borders, popups
 
 # text
-TEXT = "#e8e9ec"          # primary
-TEXT2 = "#a4a7af"         # secondary: descriptions, labels
-TEXT3 = "#80838b"         # tertiary: timing, meta (still >= 4.5:1 on BG)
+TEXT = "#ececef"          # primary
+TEXT2 = "#a2a5ae"         # secondary: descriptions, labels (7.2:1 on SURFACE)
+TEXT3 = "#868993"         # tertiary: timing, meta (>= 4.6:1 on BG, SURFACE and SURFACE2)
 
 # the one accent
-ACCENT = "#2f72e0"        # fills: primary buttons, switches, checkboxes (white text 4.8:1)
-ACCENT_HOVER = "#3d80ec"
-ACCENT_PRESSED = "#2862c4"
-ACCENT_TEXT = "#7aaaff"   # accent used as text on dark surfaces
-ACCENT_SOFT = "rgba(47,114,224,0.18)"   # selection / selected nav item
+ACCENT = "#2d6be0"        # fills: primary buttons, switches, checkboxes (white text 4.9:1)
+ACCENT_HOVER = "#3877ea"
+ACCENT_PRESSED = "#285fc6"
+ACCENT_TEXT = "#86b0ff"   # accent used as text / icons on dark surfaces
+ACCENT_SOFT = "rgba(45,107,224,0.20)"   # selection, checked key chips
 
 # states
-DANGER = "#f06b73"
+DANGER = "#f2727a"
+DANGER_FILL = "#cc3b44"   # solid destructive button (white text 4.9:1)
+DANGER_FILL_HOVER = "#d6444d"
 SUCCESS = "#4cc38a"
 WARN = "#e2a53b"          # busy / loading
 REC = "#e5484d"           # meeting recording, recording dot
@@ -38,6 +40,13 @@ OVERLAY_ACCENT = "#4d8df5"   # overlay pill: hands-free wave start, info dot (a 
 OVERLAY_LIGHT = "#96c4ff"    # overlay pill: hands-free wave end, processing dots
 GAME = "#2bb3a3"          # game mode
 PAUSED = "#6b6e76"
+
+# shape + size tokens (px), used by theme.py
+RADIUS_S = 6              # chips, small buttons inside rows
+RADIUS_M = 8              # controls: buttons, inputs, combos
+RADIUS_L = 12             # cards, panels, dialogs
+CONTROL_H = 32            # one height for buttons, inputs and combos
+CONTROL_W = 260           # right-column width for combos / line edits on settings rows
 
 # meeting speakers: "You" uses the accent text colour, "Others" a warm sand so the two voices never blur
 YOU = ACCENT_TEXT

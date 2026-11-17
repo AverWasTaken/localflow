@@ -6,11 +6,14 @@ in for the microphone, then drives it with unmarked SendInput key events (like a
      the user's clipboard is restored, the Start menu does not open (Win menu mask)
   2. Alt+Shift+Z -> the last result is pasted again, the Z is swallowed
   3. nothing selected + an edit instruction -> "Select some text first", nothing inserted, clipboard intact
+  4. a spoken question ("How many hours is it from 7:30 a.m. to 5 p.m.?") -> answered in the overlay card,
+     nothing typed into Notepad, the answer logged (and saved to history)
 
    .venv\\Scripts\\python.exe tests\\test_command_integration.py
 Stop any running LocalFlow instance first (single-instance mutex).
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,7 +61,9 @@ def save_and_read(tmpf):
 
 
 def main():
-    wav = ROOT / "tests" / "audio" / "cmd_uppercase.wav"
+    # the app reads LOCALFLOW_TEST_WAV on every release: copy a different recording over it to change what is "said"
+    wav = Path(tempfile.gettempdir()) / "localflow_command_test.wav"
+    shutil.copyfile(ROOT / "tests" / "audio" / "cmd_uppercase.wav", wav)
     env = dict(os.environ, LOCALFLOW_TEST_WAV=str(wav), LOCALFLOW_CONSOLE="1")
     logp = ROOT / "tests" / "app_cmd_test.log"
     log = open(logp, "w")
@@ -154,6 +159,28 @@ def main():
         check("no-selection edit command: 'nothing selected', nothing inserted",
               "command failed (nothing selected)" in applog() and doc.rstrip() == before.rstrip(), f"({doc!r})")
         check("clipboard intact after no-selection command", hi.clipboard_text() == "STALE-CLIP")
+
+        # ---------- 4. a question: answered in the overlay card, nothing typed
+        shutil.copyfile(ROOT / "tests" / "audio" / "cmd_ask_hours.wav", wav)
+        n0 = applog().count("command answer")
+        nf = applog().count("command failed")
+        key(CTRL)
+        key(WIN)
+        time.sleep(0.8)
+        key(WIN, up=True)
+        key(CTRL, up=True)
+        t1 = time.time()
+        while applog().count("command answer") == n0 and applog().count("command failed") == nf                 and time.time() - t1 < 30:
+            time.sleep(0.2)
+        time.sleep(0.8)
+        before = doc
+        doc = save_and_read(tmpf)
+        print("   file after question:", repr(doc))
+        check("question answered (logged)", applog().count("command answer") > n0)
+        check("question: nothing typed into Notepad", doc.rstrip() == before.rstrip(), f"({doc!r})")
+        check("question: answer not typed", "9 hours" not in doc and "9.5" not in doc)
+        check("question: answer is the exact 9.5 hours", "9 hours 30 minutes" in applog().split("command answer")[-1],
+              "(speech may have been heard differently; see log)")
         chord(CTRL, 0x57)           # Ctrl+W: close only our temp tab
         time.sleep(0.5)
     finally:

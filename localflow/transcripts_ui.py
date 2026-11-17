@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, 
 
 from .history_ui import confirm, flash_copied
 from .palette import OTHERS, REC, SURFACE2, TEXT, TEXT2, TEXT3, YOU
-from .theme import btn, hsep, label, repolish
+from .icons import muted_icon
+from .theme import btn, label, repolish
 from .uifmt import (ACTIVE, PRESET_LABELS, RESUMABLE, fmt_duration, fmt_elapsed, fmt_when, fmt_when_short,
                     level_unit, parse_turns, preset_label, status_text)
 
@@ -139,13 +140,13 @@ class _Row(QWidget):
         lay.setContentsMargins(12, 9, 12, 10)
         lay.setSpacing(4)
         self.title = QLabel()
-        self.title.setStyleSheet("font-weight: 600;")
+        self.title.setObjectName("trTitle")
         self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay.addWidget(self.title)
         meta = QHBoxLayout()
         meta.setSpacing(8)
         self.kind = QLabel()
-        meta.addWidget(self.kind)
+        meta.addWidget(self.kind, 0, Qt.AlignVCenter)
         self.meta = label(role="faint")
         meta.addWidget(self.meta)
         meta.addStretch(1)
@@ -180,15 +181,21 @@ class _Row(QWidget):
                 self.bar.setValue(0)
         if active:
             self.status.setText(status_text(status, progress, msg))
-            self.status.setStyleSheet("")
+            self._tone(self.status, "")
             self.status.show()
         elif status in RESUMABLE:
             self.status.setText(status_text(status))
             self.status.setToolTip(error)
-            self.status.setStyleSheet("color: #f06b73;" if status == "failed" else "color: #e2a53b;")
+            self._tone(self.status, "statusFailed" if status == "failed" else "statusWarn")
             self.status.show()
         else:
             self.status.hide()
+
+    @staticmethod
+    def _tone(lbl: QLabel, name: str) -> None:
+        if lbl.objectName() != name:
+            lbl.setObjectName(name)
+            repolish(lbl)
 
     def _elide(self) -> None:
         w = max(80, self.title.width() or 220)
@@ -207,22 +214,22 @@ class _NoteCard(QFrame):
         super().__init__()
         self.setObjectName("panel")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 10, 10, 14)
+        lay.setContentsMargins(18, 10, 10, 16)
         lay.setSpacing(6)
         head = QHBoxLayout()
         head.setSpacing(6)
         t = QLabel(preset_label(r.get("preset", ""), r.get("prompt", "")))
-        t.setStyleSheet("font-weight: 600;")
+        t.setObjectName("noteTitle")
         if r.get("preset") == "custom":
             t.setToolTip(r.get("prompt", ""))
         head.addWidget(t)
         head.addWidget(label(fmt_when(r.get("created")), role="faint"))
         head.addStretch(1)
         out = (r.get("output") or "").strip()
-        cp = btn("Copy", "ghost")
-        cp.clicked.connect(lambda: (QGuiApplication.clipboard().setText(out), flash_copied(cp, "Copy")))
+        cp = btn("", icon="copy", tip="Copy this answer")
+        cp.clicked.connect(lambda: (QGuiApplication.clipboard().setText(out), flash_copied(cp, "")))
         head.addWidget(cp)
-        dl = btn("Delete", "ghostDanger")
+        dl = btn("", "iconDanger", icon="trash", tip="Delete this answer")
         dl.clicked.connect(lambda: on_delete(r))
         head.addWidget(dl)
         lay.addLayout(head)
@@ -232,7 +239,7 @@ class _NoteCard(QFrame):
         body.setWordWrap(True)
         body.setTextInteractionFlags(Qt.TextSelectableByMouse)
         body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        body.setStyleSheet("font-size: 13px;")
+        body.setContentsMargins(0, 0, 8, 0)
         lay.addWidget(body)
 
 
@@ -258,9 +265,14 @@ class TranscriptsPage(QWidget):
         self._relay.deleted.connect(lambda _tid: self.refresh_list())
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 26, 32, 20)
-        root.setSpacing(14)
-        root.addWidget(label("Transcriptions", "pageTitle"))
+        root.setContentsMargins(36, 28, 36, 24)
+        root.setSpacing(16)
+        # title row: page title on the left, the audio-file controls on the right
+        self._head = QHBoxLayout()
+        self._head.setSpacing(8)
+        self._head.addWidget(label("Transcriptions", "pageTitle"), 0, Qt.AlignVCenter)
+        self._head.addStretch(1)
+        root.addLayout(self._head)
 
         if self.svc is None:
             ban = QFrame()
@@ -279,7 +291,7 @@ class TranscriptsPage(QWidget):
         split.addWidget(self._build_detail())
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
-        split.setSizes([290, 700])
+        split.setSizes([300, 700])
         root.addWidget(split, 1)
 
         self._elapsed = QTimer(self)
@@ -307,45 +319,45 @@ class TranscriptsPage(QWidget):
 
     # ------------------------------------------------------------------ building
     def _build_actions(self) -> QWidget:
-        w = QFrame()
-        w.setObjectName("panel")
+        w = QWidget()
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(12)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
         self.rec_btn = btn("Record meeting", "record")
         self.rec_btn.setToolTip("Records your microphone as You and this PC's sound as Others. "
                                 "Transcribed when you stop.")
         self.rec_btn.setIcon(self._dot_icon())
-        self.rec_btn.setIconSize(QSize(10, 10))
+        self.rec_btn.setIconSize(QSize(18, 10))
         self.rec_btn.setFixedHeight(32)
         self.rec_btn.clicked.connect(self._toggle_record)
         lay.addWidget(self.rec_btn)
-        self.rec_time = label("", "statValue")
-        self.rec_time.setStyleSheet("font-size: 17px;")
+        self.rec_time = label("", "recTime")
+        lay.addSpacing(4)
         lay.addWidget(self.rec_time)
         self.m_you = LevelMeter("You", YOU)
         self.m_oth = LevelMeter("Others", OTHERS)
         lay.addWidget(self.m_you)
         lay.addWidget(self.m_oth)
+        lay.addSpacing(6)
         self.rec_hint = label("Your mic is saved as You, this PC's sound as Others.", role="faint")
         lay.addWidget(self.rec_hint)
         lay.addStretch(1)
-        lay.addWidget(hsep(vertical=True))
-        lay.addWidget(label("Style", role="muted"))
         self.style_combo = QComboBox()
-        self.style_combo.setFixedWidth(170)
-        self.style_combo.setToolTip("Raw keeps the words as heard. A style runs AI cleanup on the text.")
-        lay.addWidget(self.style_combo)
-        self.file_btn = btn("Transcribe file...", "primary")
+        self.style_combo.setFixedWidth(180)
+        self.style_combo.setToolTip("Style for audio files. Raw keeps the words as heard; a style runs AI cleanup "
+                                    "on the text.")
+        self._head.addWidget(label("Style", role="muted"), 0, Qt.AlignVCenter)
+        self._head.addWidget(self.style_combo, 0, Qt.AlignVCenter)
+        self.file_btn = btn("Transcribe file...", "primary", icon="transcripts")
         self.file_btn.clicked.connect(self._pick_file)
-        lay.addWidget(self.file_btn)
+        self._head.addWidget(self.file_btn, 0, Qt.AlignVCenter)
         self._fill_styles()
         return w
 
     @staticmethod
     def _dot_icon():
         from PySide6.QtGui import QIcon, QPixmap
-        pm = QPixmap(20, 20)
+        pm = QPixmap(36, 20)                    # dot + a transparent gap before the button text
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
@@ -358,7 +370,7 @@ class TranscriptsPage(QWidget):
     @staticmethod
     def _stop_icon():
         from PySide6.QtGui import QIcon, QPixmap
-        pm = QPixmap(20, 20)
+        pm = QPixmap(36, 20)
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
@@ -373,10 +385,11 @@ class TranscriptsPage(QWidget):
         w.setMinimumWidth(240)
         w.setMaximumWidth(420)
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 0, 14, 0)
+        lay.setContentsMargins(0, 0, 16, 0)
         lay.setSpacing(10)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search transcripts")
+        self.search.addAction(muted_icon("search", 15), QLineEdit.LeadingPosition)
         self.search.setClearButtonEnabled(True)
         self._search_t = QTimer(self)
         self._search_t.setSingleShot(True)
@@ -390,9 +403,8 @@ class TranscriptsPage(QWidget):
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.currentItemChanged.connect(self._on_select)
         lay.addWidget(self.list, 1)
-        self.list_empty = label("", role="muted", wrap=True)
+        self.list_empty = label("", "listEmpty", wrap=True)
         self.list_empty.setAlignment(Qt.AlignCenter)
-        self.list_empty.setStyleSheet("padding: 30px 10px;")
         lay.addWidget(self.list_empty)
         return w
 
@@ -411,7 +423,7 @@ class TranscriptsPage(QWidget):
         # 1: a transcript
         d = QWidget()
         dl = QVBoxLayout(d)
-        dl.setContentsMargins(18, 0, 0, 0)
+        dl.setContentsMargins(20, 0, 0, 0)
         dl.setSpacing(10)
         self.title_edit = QLineEdit()
         self.title_edit.setObjectName("titleEdit")
@@ -422,19 +434,18 @@ class TranscriptsPage(QWidget):
         mrow.addWidget(self.title_edit, 1)
         self.note = label(role="faint")
         mrow.addWidget(self.note)
-        self.copy_btn = btn("Copy", "mini")
+        self.copy_btn = btn("Copy", "mini", icon="copy")
         self.copy_btn.clicked.connect(self._copy)
         mrow.addWidget(self.copy_btn)
-        self.export_btn = btn("Export", "mini")
+        self.export_btn = btn("Export", "mini", icon="download")
         self.export_btn.setProperty("menu", "1")
         m = QMenu(self.export_btn)
         m.addAction("Text file (.txt)", lambda: self._export("txt"))
         m.addAction("Markdown (.md)", lambda: self._export("md"))
         self.export_btn.setMenu(m)
         mrow.addWidget(self.export_btn)
-        self.del_btn = btn("Delete", "mini")
-        self.del_btn.setProperty("role", "danger")
-        self.del_btn.setStyleSheet("padding: 4px 10px; font-size: 12px;")
+        self.del_btn = btn("", "iconDanger", icon="trash", tip="Delete this transcript")
+        self.del_btn.setFixedSize(32, 32)
         self.del_btn.clicked.connect(self._delete)
         mrow.addWidget(self.del_btn)
         dl.addLayout(mrow)
@@ -447,7 +458,7 @@ class TranscriptsPage(QWidget):
         self.band = QFrame()
         self.band.setObjectName("panel")
         bl = QHBoxLayout(self.band)
-        bl.setContentsMargins(14, 10, 10, 10)
+        bl.setContentsMargins(16, 12, 12, 12)
         bl.setSpacing(12)
         bcol = QVBoxLayout()
         bcol.setSpacing(6)
@@ -531,7 +542,7 @@ class TranscriptsPage(QWidget):
         self.prompt.setPlaceholderText("Ask your own question, e.g. What did we decide about the launch date?")
         self.prompt.setFixedHeight(64)
         crow.addWidget(self.prompt, 1)
-        self.ask_btn = btn("Ask", "primary", 80)
+        self.ask_btn = btn("Ask", "primary", 88)
         self.ask_btn.clicked.connect(lambda: self._ask("custom"))
         crow.addWidget(self.ask_btn, 0, Qt.AlignBottom)
         lay.addLayout(crow)
@@ -540,14 +551,13 @@ class TranscriptsPage(QWidget):
 
         # live answer
         self.live = QFrame()
-        self.live.setObjectName("panel")
-        self.live.setStyleSheet("QFrame#panel { border-color: rgba(122,170,255,0.45); }")
+        self.live.setObjectName("liveAnswer")
         ll = QVBoxLayout(self.live)
-        ll.setContentsMargins(16, 10, 10, 14)
+        ll.setContentsMargins(18, 10, 10, 16)
         ll.setSpacing(6)
         lh = QHBoxLayout()
         self.live_title = QLabel("")
-        self.live_title.setStyleSheet("font-weight: 600;")
+        self.live_title.setObjectName("noteTitle")
         lh.addWidget(self.live_title)
         self.live_status = label(role="faint")
         lh.addWidget(self.live_status)
@@ -566,7 +576,6 @@ class TranscriptsPage(QWidget):
         self.live.hide()
 
         self.notes_title = label("Saved answers", "sectionTitle")
-        self.notes_title.setStyleSheet("font-size: 14px;")
         lay.addSpacing(4)
         lay.addWidget(self.notes_title)
         self.notes_box = QVBoxLayout()
@@ -760,14 +769,14 @@ class TranscriptsPage(QWidget):
             except Exception:
                 self.band_bar.setValue(0)
             self.band_text.setText(status_text(status, progress, msg))
-            self.band_text.setStyleSheet("")
+            _Row._tone(self.band_text, "")
         elif resumable:
             txt = {"failed": "Transcription failed", "interrupted": "Transcription was interrupted",
                    "cancelled": "Transcription was cancelled"}.get(status, status)
             if error:
                 txt += f": {error}"
             self.band_text.setText(txt + ". Resume picks up where it stopped.")
-            self.band_text.setStyleSheet("color: #f06b73;" if status == "failed" else "color: #e2a53b;")
+            _Row._tone(self.band_text, "statusFailed" if status == "failed" else "statusWarn")
 
     def _load_notes(self, tid: int, done: bool) -> None:
         while self.notes_box.count():

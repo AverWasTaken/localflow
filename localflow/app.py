@@ -6,28 +6,32 @@ import os
 import queue
 import threading
 import time
+from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap, QBrush, QPen
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QSystemTrayIcon
 
-from . import __version__, autostart, sounds, styles, winutil
+from . import __version__, ask, autostart, fieldprobe, sounds, styles, winutil
 from .audio import AudioInput, default_input_name, input_device_names
 from .audioutil import normalize, peak_window_rms
-from .cleanup import Cleaner, list_models, model_display_name, same_model
+from .autocomplete import Autocomplete
+from .cleanup import Cleaner, list_models, model_display_name, reasoning_budget_for, resolve_path, same_model
 from .config import Config
 from .gamemode import GameWatcher
 from .gate import ForegroundGate
 from .history import History
 from .hotkey import HotkeyManager
 from .inserter import (capture_selection, focus_window, foreground_hwnd, insert_text, is_external_target,
-                       wait_modifiers_released)
+                       set_clipboard_text, wait_modifiers_released)
+from .outmute import OutputMuter, WinEndpoints
 from .overlay import Overlay
 from .paths import LOG_PATH, MODELS_DIR
 from .pipeline import Pipeline
 from .streaming import StreamSession
 from .stt import ModelUnloaded, Transcriber
+from .tts import TtsManager
 
 try:    # transcripts / meeting recorder: optional, dictation keeps working if their deps are missing
     from .jobs import JobError, TranscriptService
@@ -46,6 +50,30 @@ except Exception as _e:     # pragma: no cover - logged when the service would b
 AUDIO_EXTS = "wav mp3 m4a aac ogg opus flac wma webm mp4 mkv mov"
 
 log = logging.getLogger("localflow")
+
+
+class _DictCfg:
+    """Read-only cfg.get() over a plain config dict (old/new snapshots in _on_config_change)."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def get(self, dotted, default=None):
+        cur = self.data
+        for part in dotted.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return default
+            cur = cur[part]
+        return cur
+
+
+def _reasoning_budget_in(data) -> int:
+    """Reasoning budget the configured cleanup model launches with under config ``data`` (0 = off)."""
+    try:
+        cfg = _DictCfg(data)
+        return reasoning_budget_for(cfg, resolve_path(cfg.get("cleanup.model_path", "") or ""))
+    except Exception:
+        return -1
 
 
 def make_icon(state: str = "ready") -> QIcon:
@@ -88,7 +116,7 @@ class Bridge(QObject):
 
 
 class LocalFlowApp:
-    def __init__(self, qapp: QApplication):
+    def __init__(self, qapp: QApplication, real_output_mute: bool = False, real_tts: bool = False):
         self.qapp = qapp
         self.cfg = Config()
         self.history = History(max_entries=int(self.cfg.get("history.max_entries", 5000)),
@@ -103,7 +131,7 @@ class LocalFlowApp:
         self.audio.on_device_change = lambda name: self._set_status(f"Ready - mic: {name}", "ready")
         self.stt = Transcriber(self.cfg)
         self.cleaner = Cleaner(self.cfg)
-        self.pipeline = Pipeline(self.cfg, self.stt, self.cleaner, self.history, insert_text)
+        self.pipeline = Pipeline(self.cfg, self.stt, self.cleaner, self.history, self._insert_dictation)
         self.hotkey = HotkeyManager(
             os.environ.get("LOCALFLOW_TEST_HOTKEY") or self.cfg.get("hotkey", "ctrl+alt"),
             self.cfg.get("handsfree_key", "space"),
@@ -131,7 +159,8 @@ class LocalFlowApp:
         self._status = "Starting..."
         self._ready = False
         self.last_result: dict = {}
-        self.last_text = ""            # last successfully inserted non-empty text (dictation or command)
+        self.last_text = ""            # last successfully inserted non-empty text (dictation or command) or answer
+        self._answer_until = 0.0       # monotonic time the overlay answer card hides; toasts wait until then
         self._mode = "dictate"         # mode of the current / last recording: dictate | command
         self._target = (0, "", "")     # command mode: (hwnd, exe, title) of the window at key-down
         self._cmd_stop_sent = False
@@ -148,6 +177,51 @@ class LocalFlowApp:
         self._toast_timer = False
         self._last_audio_dir = ""
         self.transcripts = self._make_transcripts()
+        self.autocomplete = self._make_autocomplete()
+        # speakers muted while dictating (audio.mute_output_while_dictating); inert unless the real entry point
+        # asks for it, so tests never touch real audio devices
+        self.outmute = OutputMuter(WinEndpoints() if real_output_mute and os.name == "nt" else None,
+                                   is_recording=lambda: self._recording,
+                                   max_s=lambda: float(self.cfg.get("audio.max_duration_s", 300) or 300) + 30)
+        # spoken command-mode answers (separate GPU process); inert unless the real entry point asks for it
+        self.tts = TtsManager(self.cfg, blocked=lambda: self.game_active or not self.cfg.get("enabled", True),
+                              inert=not real_tts, wav_out=os.environ.get("LOCALFLOW_TTS_WAV_OUT", ""))
+
+    # ------------------------------------------------------------------ Tab autocomplete
+    def _make_autocomplete(self) -> Optional[Autocomplete]:
+        """Never fatal: dictation keeps working if the ghost window / autocomplete can't be set up."""
+        if QApplication.instance() is None:     # no GUI (tests): a QWidget here would abort the process
+            return None
+        try:
+            from .ghost import GhostOverlay
+            self.ghost = GhostOverlay()
+            ac = Autocomplete(self.cfg, self, ghost=self.ghost)
+            self.hotkey.key_listener = ac
+            return ac
+        except Exception:
+            log.exception("Tab autocomplete unavailable")
+            return None
+
+    def ac_blocked(self) -> str:
+        """Why autocomplete may not guess right now ('' = it may): paused, game mode, dictation / command running."""
+        if not self.cfg.get("enabled", True):
+            return "paused"
+        if self.game_active:
+            return "game mode"
+        if self._recording:
+            return "busy (recording)"
+        if self._fg_rids:
+            return f"busy ({len(self._fg_rids)} job(s) running)"
+        return ""
+
+    def ac_server(self) -> tuple[bool, str]:
+        s = self.cleaner.server
+        return bool(s.ready and not s.suspended), s.base_url
+
+    def _ac_cancel(self, why: str) -> None:
+        ac = getattr(self, "autocomplete", None)
+        if ac is not None:
+            ac.cancel(why)
 
     # ------------------------------------------------------------------ overlay/sound helpers
     def _ov(self, state: str, text: str = "") -> None:
@@ -155,6 +229,20 @@ class LocalFlowApp:
             self.overlay.set_state(state, text)
         elif state == "hidden":
             self.overlay.set_state("hidden")
+
+    def _rid_toast(self, rid, state: str, text: str) -> None:
+        """Toast for a finished dictation, shown even with ui.overlay off. If a newer recording started meanwhile,
+        its pill wins: the toast is queued (bridge.toast waits until that recording / job is done)."""
+        if self._recording or self._rec_id != rid:
+            self.bridge.toast.emit(state, text)
+        else:
+            self.overlay.set_state(state, text)
+
+    def _insert_dictation(self, text: str, mode: str = "paste", restore: bool = True,
+                          restore_delay_ms: int = 300) -> Optional[dict]:
+        """Pipeline inserter: insert_text, or (no text box focused, see fieldprobe) copy to the clipboard."""
+        return fieldprobe.deliver(text, cfg=self.cfg, insert=insert_text, copy=set_clipboard_text, mode=mode,
+                                  restore=restore, restore_delay_ms=restore_delay_ms)
 
     def _snd(self, name: str) -> None:
         sounds.play(name, self.cfg)
@@ -175,6 +263,7 @@ class LocalFlowApp:
             if rid in self._fg_rids:
                 return
             self._fg_rids.add(rid)
+        self._ac_cancel("dictation")        # stop a running guess (frees llama slot 1) and hide the ghost
         self.gate.begin()
 
     def _fg_end(self, rid: Optional[int]) -> None:
@@ -220,6 +309,7 @@ class LocalFlowApp:
             except Exception:
                 log.exception("controller error on %s", ev)
                 self._recording = False
+                self.outmute.release()
                 if was_rec or self._rec_id != rid_before:
                     self._fg_end(self._rec_id)
                 self._ov("hidden")
@@ -237,6 +327,9 @@ class LocalFlowApp:
             return
         self._rec_id += 1
         rid = self._rec_id
+        # silence a spoken answer first (and drop answers of older recordings still on their way); the mic
+        # pre-roll would hold the voice if it was audible just now
+        skip_preroll = self.tts.recording_started(rid)
         self._fg_begin(rid)             # before anything else: background jobs yield the GPU from now on
         if self._game_blocks():
             # no overlay: it could steal focus / flicker over a fullscreen game
@@ -245,7 +338,10 @@ class LocalFlowApp:
             self._snd("error")
             self._fg_end(rid)
             return
+        if self.cfg.get("audio.mute_output_while_dictating", True) and not self._meeting_on:
+            self.outmute.arm(rid)       # muted in _show_recording, once the hold is confirmed
         self._mode = "command" if mode == "command" else "dictate"
+        self._answer_until = 0.0        # the recording pill replaces any answer card
         self._locked = False
         self._t_start = time.perf_counter()
         if self._mode == "command":
@@ -254,7 +350,7 @@ class LocalFlowApp:
             self._target = (hwnd, exe, title)
             self._ctx = (exe, title)
             self._cmd_stop_sent = False
-            self.audio.begin()
+            self._begin_audio(skip_preroll)
             self._recording = True
             self._session = None        # commands are short: single pass, no streaming
             log.info("command recording started: app=%s title=%r", exe or "?", title[:100])
@@ -262,12 +358,22 @@ class LocalFlowApp:
             self._ctx = winutil.foreground_info()
             # style is decided from the window the user is dictating INTO, now, not at release
             self._style = styles.resolve(self._ctx[0], self._ctx[1], self.cfg)
-            self.audio.begin()
+            self._begin_audio(skip_preroll)
             self._recording = True
             self._session = self._start_session()
+            if self.cfg.get("insert.copy_when_no_field", True):
+                fieldprobe.warm()       # UIA thread + the focused app's provider ready before the insert-time check
             log.info("recording started: app=%s style=%s%s title=%r", self._ctx[0] or "?", self._style.style,
                      f" (rule: {self._style.rule})" if self._style.rule else "", self._ctx[1][:100])
         threading.Timer(0.12, self._show_recording, args=(rid,)).start()
+
+    def _begin_audio(self, skip_preroll: bool = False) -> None:
+        if skip_preroll:
+            drop = getattr(self.audio, "drop_preroll", None)
+            if drop is not None:
+                drop()
+                log.info("mic pre-roll skipped (a spoken answer was playing)")
+        self.audio.begin()
 
     def _start_session(self) -> Optional[StreamSession]:
         """Chunked transcription while recording (long dictations). Never raises."""
@@ -300,6 +406,8 @@ class LocalFlowApp:
             self._ov("handsfree" if self._locked else "recording", self._rec_label())
             self._snd("start")
             self._ui_shown = rid
+            if not self._meeting_on:    # mute only after the start cue had time to play
+                self.outmute.engage(rid, delay=0.2 if self.cfg.get("ui.sounds", True) else 0.0)
 
     def _do_handsfree(self) -> None:
         if not self._recording:
@@ -313,6 +421,7 @@ class LocalFlowApp:
         if not self._recording:
             return
         self._recording = False
+        self.outmute.release()          # speakers back on before the stop cue and STT
         rid = self._rec_id
         t_release = time.perf_counter()
         held = t_release - self._t_start
@@ -340,6 +449,7 @@ class LocalFlowApp:
         if not self._recording:
             return
         self._recording = False
+        self.outmute.release()
         self._drop_session()
         self.audio.cancel()
         self._fg_end(self._rec_id)
@@ -400,7 +510,13 @@ class LocalFlowApp:
             if r["status"] == "ok":
                 if r.get("text"):
                     self.last_text = r["text"]
-                self._ov("hidden")
+                if r.get("copy_failed"):        # no text box focused and the clipboard could not be set
+                    self._rid_toast(rid, "error", fieldprobe.COPY_FAILED_TOAST)
+                    self._snd("error")
+                elif r.get("copied"):           # no text box focused: the text is on the clipboard
+                    self._rid_toast(rid, "info", fieldprobe.COPIED_TOAST)
+                else:
+                    self._ov("hidden")
             elif r["status"] == "discard":
                 log.info("discarded: %s", r["reason"])
                 self._ov("hidden")
@@ -459,6 +575,8 @@ class LocalFlowApp:
                 self._ov("info", "No command heard")
                 return
             log.info("command: %r (app=%s, %.1fs audio, stt %d ms)", instruction[:150], exe or "?", dur, res.ms)
+            if cfg.get("command_mode.answer_questions", True) and ask.is_question(instruction):
+                return self._answer_question(rid, instruction, target, dur, res.ms, t_rel)
             selection = ""
             if self._can_capture(exe):
                 if not wait_modifiers_released(2.0):
@@ -496,6 +614,8 @@ class LocalFlowApp:
             self.last_text = text
             total_ms = int((time.perf_counter() - t_rel) * 1000)
             note = f"  [on selection: {len(selection)} chars]" if selection else ""
+            if info.get("python"):
+                note += "  [python]"
             try:
                 self.history.record_stats(kind="command")
             except Exception:
@@ -518,6 +638,70 @@ class LocalFlowApp:
                                  toast="Command failed")
         finally:
             self._fg_end(rid)
+
+    def _question_selection(self, hwnd: int, exe: str) -> str:
+        """Selected text for a question about it ("what does this mean"); "" whenever it can't be read safely.
+        Unlike a command, a question is still answered without it."""
+        if not self._can_capture(exe):
+            return ""
+        if not wait_modifiers_released(2.0) or foreground_hwnd() != hwnd:
+            return ""
+        cst, sel = capture_selection(int(self.cfg.get("command_mode.capture_timeout_ms", 600)), target_hwnd=hwnd)
+        return sel if cst == "text" else ""
+
+    def _answer_question(self, rid, instruction: str, target, dur: float, stt_ms: int, t_rel: float) -> None:
+        """Command mode question: answer it in the overlay card (exactly when it is a time span / arithmetic,
+        otherwise via the LLM). Nothing is inserted; the answer becomes last_text so paste-last can insert it."""
+        hwnd, exe, title = target
+        cfg = self.cfg
+        question = ask.question_text(instruction)
+        selection = ""
+        ans = ask.quick_answer(question, datetime.now())
+        info = {"ms": 0, "llm": False}
+        if not ans:
+            if ask.references_text(question):
+                selection = self._question_selection(hwnd, exe)
+                log.info("command: question selection %s", f"{len(selection)} chars" if selection else "none")
+            ans, info = self.cleaner.answer(question, selection, exe)
+            if not ans:
+                why = info.get("reason") or "no answer"
+                return self._command_failed(why, instruction, exe, title, dur, toast=f"Couldn't answer: {why}")
+        self.last_text = ans
+        total_ms = int((time.perf_counter() - t_rel) * 1000)
+        note = f"  [answer, on selection: {len(selection)} chars]" if selection else "  [answer]"
+        if info.get("python"):
+            note += "  [python]"
+        try:
+            self.history.record_stats(kind="command")
+        except Exception:
+            log.exception("stats write failed")
+        if cfg.get("history.enabled", True):
+            try:
+                self.history.add(instruction + note, ans, exe, dur, stt_ms, info.get("ms", 0), total_ms,
+                                 title=title, style="command")
+            except Exception:
+                log.exception("history write failed")
+        log.info("command answer (%s): llm %d ms | total %d ms | %r", "llm" if info.get("llm") else "local",
+                 info.get("ms", 0), total_ms, ans[:120])
+        if self._recording or self._rec_id != rid:      # a newer recording started meanwhile: its UI wins
+            log.info("answer not shown: a new recording is in progress")
+            return
+        duration_ms = min(15000, 4000 + 50 * len(ans))
+        spoken_s = self._speak_answer(rid, ans)
+        if spoken_s > 0:        # keep the card up while the answer is read out
+            duration_ms = max(duration_ms, int(spoken_s * 1000) + 2000)
+        self._answer_until = time.monotonic() + duration_ms / 1000.0     # before the gate is released (finally)
+        self.overlay.show_answer(question, ans, duration_ms)    # shown even with ui.overlay off, like errors
+
+    def _speak_answer(self, rid, ans: str) -> float:
+        """Read a question's answer aloud (command_mode.speak_answers). Seconds of speech expected, 0 = not spoken."""
+        if self._meeting_on:            # never talk over (or into) a meeting recording
+            return 0.0
+        try:
+            return float(self.tts.speak(ans, rid) or 0.0)
+        except Exception:
+            log.exception("tts: speak failed")
+            return 0.0
 
     # ------------------------------------------------------------------ paste last
     def _run_paste(self, hwnd: int = 0) -> None:
@@ -722,6 +906,9 @@ class LocalFlowApp:
     def _on_meeting_state(self, st: dict) -> None:
         was = self._meeting_on
         self._meeting_on = bool(st.get("recording"))
+        if self._meeting_on and not was:    # a meeting recording needs the call audio: unmute right away
+            self.outmute.release(wait=0)
+            self.tts.stop("meeting recording")
         self._apply_tray()
         reason = st.get("stop_reason") or ""
         if was and not self._meeting_on and reason:     # stopped by itself (max length, low disk, write error)
@@ -741,22 +928,28 @@ class LocalFlowApp:
         if self._game_ui:
             self._toasts.clear()
             return
-        if self._recording or self.gate.busy():
+        left = self._answer_until - time.monotonic()        # an answer card is showing: let it finish first
+        if self._recording or self.gate.busy() or left > 0:
             if not self._toast_timer:
                 self._toast_timer = True
 
                 def again():
                     self._toast_timer = False
                     self._flush_toasts()
-                QTimer.singleShot(1000, again)
+                busy = self._recording or self.gate.busy()
+                QTimer.singleShot(1000 if busy else int(left * 1000) + 250, again)
             return
         # one pill at a time: the latest error wins over any info (an error must not be hidden by a later success)
         errors = [t for t in self._toasts if t[0] == "error"]
         state, text = errors[-1] if errors else self._toasts[-1]
+        forced = text == fieldprobe.COPIED_TOAST        # dictation copied (no text box): shown even with ui.overlay off
         if len(self._toasts) > 1:
             text = f"{text} (+{len(self._toasts) - 1} more)"
         self._toasts.clear()
-        self._ov(state, text)
+        if forced:
+            self.overlay.set_state(state, text)
+        else:
+            self._ov(state, text)
 
     # ------------------------------------------------------------------ boot
     def _boot(self) -> None:
@@ -789,6 +982,8 @@ class LocalFlowApp:
                 if dev != "cuda":
                     self._ov("error", "GPU unavailable - using CPU")
             log.info("READY: stt=%s/%s/%s mic=%s", mname, dev, comp, mic)
+            if not self.game_active:        # spoken answers: after the dictation models, never under a game
+                self.tts.start()
         except Exception:
             log.exception("boot failed")
             self._set_status("Startup failed - see log", "error")
@@ -813,6 +1008,8 @@ class LocalFlowApp:
             t0 = time.perf_counter()
             self.game_active = True
             self._game_ui = True
+            self.outmute.release(wait=0)
+            self.tts.shutdown("game mode")      # frees its GPU memory (kills the server process)
             if self._recording:
                 self.hotkey.force_idle()
                 self._ctl.put(("cancel", "game mode"))
@@ -871,6 +1068,7 @@ class LocalFlowApp:
             finally:
                 self.game_active = False        # never leave the hotkey dead, whatever failed above
                 self._sync_hotkey()
+            self.tts.start()                    # spoken answers come back last (after speech + cleanup models)
             if not self.stt.ready:
                 self._set_status("Speech model failed to load - see log", "error")
                 return
@@ -895,6 +1093,9 @@ class LocalFlowApp:
                     d = d.get(p, {}) if isinstance(d, dict) else {}
                 return d
             return g(old) != g(new)
+        # model_reasoning restarts llama-server only when the budget of the configured model changes (editing the
+        # budget while reasoning is off, or another model's entry, needs no reload)
+        ch.reasoning_launch_changed = _reasoning_budget_in(old) != _reasoning_budget_in(new)
         threading.Thread(target=self._apply_config, args=(ch,), daemon=True, name="cfg-apply").start()
 
     def _apply_config(self, ch) -> None:
@@ -903,6 +1104,8 @@ class LocalFlowApp:
                 self.hotkey.set_hotkey(self.cfg.get("hotkey"))
             if ch("command_mode", "enabled") or ch("command_mode", "hotkey"):
                 self.hotkey.set_command_hotkey(self._command_spec())
+            if ch("autocomplete") and getattr(self, "autocomplete", None) is not None:
+                self.autocomplete.apply_config()
             if ch("paste_last"):
                 self.hotkey.set_paste_hotkey(self._paste_spec())
             if ch("history", "max_entries") or ch("history", "retention_days"):
@@ -915,6 +1118,13 @@ class LocalFlowApp:
                 self._sync_hotkey()
                 self._set_status("Ready" if en else "Paused", "ready" if en else "paused")
                 self._ov("info", "Resumed" if en else "Paused")
+                if not en:
+                    self.tts.shutdown("paused")
+            if ch("enabled") or any(ch("command_mode", k) for k in ("speak_answers", "enabled", "answer_questions")):
+                if self.tts.enabled() and self._ready and not self.game_active and self.cfg.get("enabled", True):
+                    self.tts.start()
+                elif not self.tts.enabled():
+                    self.tts.shutdown("spoken answers off")
             if ch("mic") or ch("audio", "keep_open"):
                 self.audio.reopen()
                 self._set_status(f"Ready - mic: {self.audio.device_name}", "ready")
@@ -938,7 +1148,8 @@ class LocalFlowApp:
                             self._sync_hotkey()
                         self._sync_hotkey()
                         self._set_status(self._game_text(), "game")
-            if any(ch("cleanup", k) for k in ("model_path", "model_args", "server_exe", "gpu_layers", "ctx")):
+            if any(ch("cleanup", k) for k in ("model_path", "model_args", "server_exe", "gpu_layers", "ctx")) or \
+                    (ch("cleanup", "model_reasoning") and getattr(ch, "reasoning_launch_changed", True)):
                 self._apply_cleanup_model()
             if ch("cleanup", "enabled") and self.cfg.get("cleanup.enabled"):
                 self.cleaner.start()
@@ -1007,6 +1218,9 @@ class LocalFlowApp:
         self.act_autostyle = menu.addAction("Auto style by app")
         self.act_autostyle.setCheckable(True)
         self.act_autostyle.triggered.connect(self.toggle_auto_style)
+        self.act_autocomplete = menu.addAction("Tab autocomplete")
+        self.act_autocomplete.setCheckable(True)
+        self.act_autocomplete.triggered.connect(self.toggle_autocomplete)
         self.mic_menu = menu.addMenu("Microphone")
         self.mic_menu.aboutToShow.connect(self._fill_mic_menu)
         self.model_menu = menu.addMenu("Cleanup model")
@@ -1042,6 +1256,8 @@ class LocalFlowApp:
         self.act_pause.setText("Pause dictation" if en else "Resume dictation")
         self.act_cleanup.setChecked(bool(self.cfg.get("cleanup.enabled", True)))
         self.act_autostyle.setChecked(bool(self.cfg.get("auto_style", True)))
+        self.act_autocomplete.setChecked(bool(self.cfg.get("autocomplete.enabled", True)))
+        self.act_autocomplete.setEnabled(getattr(self, "autocomplete", None) is not None)
         self.act_game.setChecked(bool(self.cfg.get("game_mode.enabled", True)))
         has_last = bool(self.last_text)
         self.act_paste_last.setEnabled(has_last)
@@ -1105,6 +1321,11 @@ class LocalFlowApp:
         if same_model(self.cfg.get("cleanup.model_path", ""), path):
             return
         self.cfg.set("cleanup.model_path", path)    # saved + _on_config_change restarts the server
+        if self.settings_win is not None:
+            try:
+                self.settings_win.refresh_cleanup_model()
+            except Exception:
+                log.exception("settings window refresh failed")
 
     def toggle_pause(self) -> None:
         self.cfg.set("enabled", not self.cfg.get("enabled", True))
@@ -1116,6 +1337,11 @@ class LocalFlowApp:
 
     def toggle_game_mode(self) -> None:
         self.cfg.set("game_mode.enabled", not self.cfg.get("game_mode.enabled", True))
+
+    def toggle_autocomplete(self) -> None:
+        on = not self.cfg.get("autocomplete.enabled", True)
+        self.cfg.set("autocomplete.enabled", on)        # _on_config_change starts / stops it
+        self._ov("info", "Tab autocomplete on" if on else "Tab autocomplete off")
 
     def toggle_auto_style(self) -> None:
         on = not self.cfg.get("auto_style", True)
@@ -1144,8 +1370,15 @@ class LocalFlowApp:
     def quit(self) -> None:
         log.info("quitting")
         self._shutdown.set()
+        self.outmute.shutdown()         # speakers back on even if we quit mid-dictation
+        try:
+            self.tts.shutdown("quit")
+        except Exception:
+            log.exception("tts shutdown failed")
         try:
             self.watcher.stop()
+            if getattr(self, "autocomplete", None) is not None:
+                self.autocomplete.stop()
             self.hotkey.stop()
             self.audio.stop()
             if self.transcripts is not None:
@@ -1173,11 +1406,14 @@ class LocalFlowApp:
         ft.timeout.connect(self._track_foreground)
         ft.start()
         self._fg_timer = ft
+        self.outmute.recover()          # unmute speakers a crashed / killed run left muted
         threading.Thread(target=self._controller, name="controller", daemon=True).start()
         threading.Thread(target=self._worker, name="worker", daemon=True).start()
         ok = self.hotkey.start()
         if not ok:
             log.error("keyboard hook failed to install")
+        if self.autocomplete is not None and self.autocomplete.enabled():
+            self.autocomplete.start()
         try:    # first poll BEFORE boot: a game that is already running keeps the GPU models from loading at all
             self.game_active = self.watcher.detect_initial()
         except Exception:
@@ -1200,5 +1436,8 @@ def run() -> int:
         apply_theme(qapp)
     except Exception:
         log.debug("theme not applied", exc_info=True)
-    app = LocalFlowApp(qapp)
+    # the real entry point is the only place that may mute real speakers (never under LOCALFLOW_TEST_WAV)
+    # spoken answers: off under the test-WAV hook unless the test asks for WAV output (LOCALFLOW_TTS_WAV_OUT)
+    app = LocalFlowApp(qapp, real_output_mute=not os.environ.get("LOCALFLOW_TEST_WAV"),
+                       real_tts=not os.environ.get("LOCALFLOW_TEST_WAV") or bool(os.environ.get("LOCALFLOW_TTS_WAV_OUT")))
     return app.run()

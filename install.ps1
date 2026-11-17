@@ -6,9 +6,10 @@
 #   -NoStart       don't launch LocalFlow at the end
 #   -SkipModel     don't download the AI cleanup model (about 4.5 GB)
 #   -NoTask        don't register the "LocalFlow" startup task (no admin prompt)
+#   -SkipTts       don't install the voice that reads command-mode answers aloud (about 10 GB; NVIDIA GPU only)
 #   -PauseOnError  on failure, wait for Enter before the window closes
 # Everything is logged to install.log next to this script. Exit code 0 = success.
-param([switch]$NoStart, [switch]$SkipModel, [switch]$NoTask, [switch]$PauseOnError)
+param([switch]$NoStart, [switch]$SkipModel, [switch]$NoTask, [switch]$SkipTts, [switch]$PauseOnError)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # the progress bar makes Invoke-WebRequest very slow in Windows PowerShell
@@ -130,6 +131,7 @@ function Install-LocalFlow {
     Write-Host "Install folder: $root"
 
     $script:hasGpu = $false
+    $script:gpuMb = 0
     $smi = (Get-Command nvidia-smi -ErrorAction SilentlyContinue).Source
     if (-not $smi -and (Test-Path "$env:SystemRoot\System32\nvidia-smi.exe")) { $smi = "$env:SystemRoot\System32\nvidia-smi.exe" }
     if ($smi) {
@@ -146,7 +148,8 @@ function Install-LocalFlow {
                 Warn "driver $($first[1]) is older than 580. The CUDA 13 llama.cpp build needs driver 580 or newer; update it from nvidia.com/drivers or the cleanup model will fall back to the CPU (or fail to load)."
             }
             $mb = 0
-            if ([int]::TryParse(($first[2] -replace '[^\d]', ''), [ref]$mb) -and $mb -lt 5500) {
+            if ([int]::TryParse(($first[2] -replace '[^\d]', ''), [ref]$mb)) { $script:gpuMb = $mb }
+            if ($mb -gt 0 -and $mb -lt 5500) {
                 Warn "only $($first[2]) of VRAM. large-v3-turbo plus the cleanup model want about 6 GB. Set stt.model to small.en in config.json if loading fails."
             }
         }
@@ -171,12 +174,25 @@ function Install-LocalFlow {
     if (-not (Test-Path $venvPy)) { $need += 4 } else { $need += 1 }
     if ((Get-LlamaBuild $llamaDir) -ne $LlamaTag) { $need += 2 }
     if (-not $SkipModel -and -not (Test-Path $gguf)) { $need += 5 }
+    $ttsReady = (Test-Path (Join-Path $root '.venv-tts\localflow-tts.txt')) -and
+                (Test-Path (Join-Path $root 'models\tts\Qwen3-TTS-12Hz-0.6B-CustomVoice\model.safetensors'))
+    # spoken answers are optional: too little space for them skips them instead of failing the whole setup
+    # the voice keeps ~2.6 GB of VRAM on top of the ~6 GB speech + cleanup models: only on 10 GB+ cards
+    $script:ttsSmallGpu = $script:hasGpu -and $script:gpuMb -gt 0 -and $script:gpuMb -lt 10000
+    $needTts = if ($script:hasGpu -and -not $script:ttsSmallGpu -and -not $SkipTts -and -not $ttsReady) { 10 } else { 0 }
     $needHf = if ($whisperCached) { 0 } elseif ($script:hasGpu) { 2 } else { 1 }
     $rootDrive = [IO.Path]::GetPathRoot($root); $hfDrive = [IO.Path]::GetPathRoot($hfHub)
     if ($rootDrive -ieq $hfDrive) { $need += $needHf; $needHf = 0 }
     $free = Get-FreeGB $root
     Write-Host "Free space on ${rootDrive}: $free GB (need about $need GB)"
     if ($free -lt $need) { throw "Not enough free disk space on $rootDrive ($free GB free, about $need GB needed). Free up some space and run setup again." }
+    $script:ttsNoSpace = $false
+    if ($needTts -gt 0) {
+        if ($free -lt $need + $needTts) {
+            $script:ttsNoSpace = $true
+            Warn "Spoken answers need about $needTts GB more ($free GB free, about $($need + $needTts) GB in total); skipping them. Free up space and run scripts\install-tts.ps1 later."
+        } else { Write-Host "Spoken answers (voice for command-mode answers): about $needTts GB more" }
+    }
     if ($needHf -gt 0) {
         $freeHf = Get-FreeGB $hfHub
         if ($freeHf -lt $needHf) { throw "Not enough free disk space on $hfDrive for the speech model ($freeHf GB free, about $needHf GB needed)." }
@@ -306,6 +322,24 @@ function Install-LocalFlow {
     if ($script:hasGpu) { Step 'Fetching the speech model (large-v3-turbo, about 1.6 GB; skipped if already cached)' }
     else { Step 'Fetching the CPU speech model (small.en, about 0.5 GB; skipped if already cached)' }
     Invoke-Direct $venvPy @('-c', 'import sys; from huggingface_hub import snapshot_download as s; print(s(sys.argv[1]))', $whisperRepo) 'Speech model download'
+
+    # ------------------------------------------------------------ spoken answers (optional, NVIDIA only, never fatal)
+    if ($SkipTts) { Write-Host "`nSkipping the voice for spoken answers (-SkipTts)." }
+    elseif (-not $script:hasGpu) { Write-Host "`nNo NVIDIA GPU: command-mode answers are shown, not spoken." }
+    elseif ($script:ttsSmallGpu) { Write-Host "`nSpoken answers skipped: the GPU has $($script:gpuMb) MB; the voice needs a 10 GB card next to the other models (scripts\install-tts.ps1 installs it anyway)." }
+    elseif ($script:ttsNoSpace) { Write-Host "`nSpoken answers skipped (not enough disk space)." }
+    else {
+        Step 'Installing the voice for spoken answers (Qwen3-TTS 0.6B, about 10 GB the first time; skipped if already there)'
+        $global:LASTEXITCODE = 0
+        try {
+            & (Join-Path $root 'scripts\install-tts.ps1') -Uv $uv
+            $ttsRc = $LASTEXITCODE
+        } catch { Write-Host $_.Exception.Message; $ttsRc = 1 }
+        if ($ttsRc -ne 0 -and $ttsRc -ne 3) {
+            Warn 'Spoken answers could not be installed (see the [tts] lines above). LocalFlow works without them; run scripts\install-tts.ps1 later to retry.'
+        }
+        $global:LASTEXITCODE = 0
+    }
 
     # no GPU and no config yet: start with AI cleanup off so dictation isn't held up by a slow CPU LLM
     if (-not $script:hasGpu) {

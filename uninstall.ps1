@@ -55,10 +55,10 @@ if (-not $KeepTask) {
 Write-Host "LocalFlow ($root) stopped."
 
 if ($Purge) {
-    foreach ($d in '.venv', 'models', 'bin', 'python', '.uv-cache') {
+    foreach ($d in '.venv', '.venv-tts', 'models', 'bin', 'python', '.uv-cache') {
         Remove-Item -Recurse -Force (Join-Path $root $d) -ErrorAction SilentlyContinue
     }
     Remove-Item -Recurse -Force (Join-Path $env:APPDATA 'LocalFlow') -ErrorAction SilentlyContinue
-    Write-Host "Purged .venv, models, bin, python and %APPDATA%\LocalFlow."
+    Write-Host "Purged .venv, .venv-tts, models, bin, python and %APPDATA%\LocalFlow."
 }
 exit 0

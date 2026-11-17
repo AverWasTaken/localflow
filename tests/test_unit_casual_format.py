@@ -63,7 +63,7 @@ class PromptMigration(unittest.TestCase):
 
     def test_new_prompt_has_format_rules(self):
         self.assertNotEqual(NEW_PROMPT, OLD_CASUAL_PROMPT)
-        self.assertTrue(NEW_PROMPT.startswith(OLD_CASUAL_PROMPT[:-1]))
+        self.assertTrue(NEW_PROMPT.replace(" (no agreement fixes)", "").startswith(OLD_CASUAL_PROMPT[:-1]))
         self.assertIn("backticks", NEW_PROMPT)
 
     def test_old_prompt_upgraded_and_saved(self):
@@ -119,13 +119,15 @@ class PromptMigrationV2(unittest.TestCase):
         self.assertEqual(cfg.get("styles")["casual"]["prompt"], NEW_PROMPT)
         on_disk = json.loads(p.read_text(encoding="utf-8"))
         self.assertEqual(on_disk["styles"]["casual"]["prompt"], NEW_PROMPT)
-        self.assertEqual(on_disk["migrations"], ["email_style_v1", "casual_format_v1", "casual_format_v2"])
+        self.assertEqual(on_disk["migrations"], ["email_style_v1", "casual_format_v1", "casual_format_v2",
+                                                 "model_defaults_v1", "grammar_v1"])
 
     def test_old_prompt_chains_to_new(self):
         p = self.cfg_path(OLD_CASUAL_PROMPT, ["email_style_v1"])
         cfg = Config(path=p)
         self.assertEqual(cfg.get("styles")["casual"]["prompt"], NEW_PROMPT)
-        self.assertEqual(cfg.get("migrations"), ["email_style_v1", "casual_format_v1", "casual_format_v2"])
+        self.assertEqual(cfg.get("migrations"), ["email_style_v1", "casual_format_v1", "casual_format_v2",
+                                                 "model_defaults_v1", "grammar_v1"])
 
     def test_edited_prompt_untouched(self):
         edited = CASUAL_PROMPT_V1 + " Also never use the word lol."

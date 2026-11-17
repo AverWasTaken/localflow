@@ -134,7 +134,9 @@ def restore_clipboard_retry(saved: list[tuple[int, bytes]], attempts: int = 4) -
     return False
 
 
-def set_clipboard_text(text: str) -> bool:
+def set_clipboard_text(text: str, history: bool = False) -> bool:
+    """Put ``text`` on the clipboard. Never uploaded to the cloud clipboard; kept out of Win+V clipboard history
+    unless ``history`` (the "no text box: copied" path wants it findable in Win+V)."""
     if not _open_clipboard():
         return False
     try:
@@ -142,14 +144,14 @@ def set_clipboard_text(text: str) -> bool:
         h = _hglobal_from_bytes((text + "\0").encode("utf-16-le"))
         if not h or not u32.SetClipboardData(CF_UNICODETEXT, h):
             return False
-        # keep dictated text out of Win+V clipboard history / cloud clipboard
-        for name in ("ExcludeClipboardContentFromMonitorProcessing",):
-            f = u32.RegisterClipboardFormatW(name)
+        # keep dictated text out of the cloud clipboard, and out of Win+V clipboard history unless ``history``
+        if not history:
+            f = u32.RegisterClipboardFormatW("ExcludeClipboardContentFromMonitorProcessing")
             hh = _hglobal_from_bytes(b"\x01\x00\x00\x00")
             if f and hh and not u32.SetClipboardData(f, hh):
                 k32.GlobalFree(hh)
         f = u32.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
-        hh = _hglobal_from_bytes(b"\x00\x00\x00\x00")
+        hh = _hglobal_from_bytes(b"\x01\x00\x00\x00" if history else b"\x00\x00\x00\x00")
         if f and hh and not u32.SetClipboardData(f, hh):
             k32.GlobalFree(hh)
         f = u32.RegisterClipboardFormatW("CanUploadToCloudClipboard")
@@ -202,14 +204,17 @@ def type_text(text: str) -> None:
 
 
 def insert_text(text: str, mode: str = "paste", restore: bool = True, restore_delay_ms: int = 300,
-                require_release: bool = False, release_timeout: float = 2.0, target_hwnd: int = 0) -> dict:
+                require_release: bool = False, release_timeout: float = 2.0, target_hwnd: int = 0,
+                clipboard_history: bool = False, fallback_type: bool = True) -> dict:
     """Insert text into the focused window. Returns timing info.
 
     Strict mode (command mode / paste-last; dictation keeps the old lenient behaviour):
     ``require_release``: if modifier keys are still held after ``release_timeout``, or the clipboard can't be
     snapshotted for restoring, insert NOTHING and return ok=False with info["reason"].
     ``target_hwnd``: re-checked right before the keystroke goes out; if another window has focus by then, insert
-    nothing (reason "window changed")."""
+    nothing (reason "window changed").
+    ``clipboard_history``: the pasted text may show up in Win+V history (see set_clipboard_text).
+    ``fallback_type``: False = if the clipboard can't be set, type nothing and return ok=False ("clipboard busy")."""
     t0 = time.perf_counter()
     info = {"mode": mode, "wait_ms": 0, "ok": True, "reason": ""}
     released = wait_modifiers_released(release_timeout)
@@ -240,7 +245,11 @@ def insert_text(text: str, mode: str = "paste", restore: bool = True, restore_de
         restore = False         # can't snapshot: leave our text on the clipboard rather than emptying it
     if wrong_window():
         return info
-    if not set_clipboard_text(text):
+    if not set_clipboard_text(text, history=clipboard_history):
+        if not fallback_type:
+            log.error("could not set clipboard; not inserting")
+            info.update(ok=False, reason="clipboard busy")
+            return info
         log.error("could not set clipboard; falling back to typing")
         info["mode"] = "type-fallback"
         if not wrong_window():

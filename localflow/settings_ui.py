@@ -7,9 +7,9 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
@@ -24,15 +24,24 @@ from .paths import CONFIG_PATH, LOG_PATH
 # ---------------------------------------------------------------- theme (lives in theme.py; re-exported here)
 from .theme import (ACCENT, ACCENT_HOVER, ACCENT_PRESSED, ACCENT_TEXT, BG, BORDER, DANGER, DARK_QSS,  # noqa: F401,E402
                     MUTED, SIDEBAR, SURFACE, SURFACE2, TEXT, TEXT2, TEXT3, Card, Switch, _dark_palette, _url,
-                    apply_theme, enable_dark_titlebar, label as _label, style_window)
-from .theme import btn as _btn, page as _page  # noqa: E402
+                    apply_theme, enable_dark_titlebar, label as _label, repolish, style_window)
+from .palette import CONTROL_W  # noqa: E402
+from .theme import KeyChip  # noqa: E402
+from .theme import btn as _btn, confirm as _theme_confirm, page as _page  # noqa: E402
+from .icons import icon as _icon, mark_pixmap, muted_icon, nav_icon  # noqa: E402
 from .uifmt import (RETENTION_CHOICES, command_combo_error, fmt_chord, parse_mods)  # noqa: E402
 
 
-def _combo(width: int = 250) -> QComboBox:
+def _combo(width: int = CONTROL_W) -> QComboBox:
+    """Settings dropdown. ``width`` 0 = stretch (full-width stacked rows). Long entries get the full text as a
+    tooltip, since the box elides them."""
     c = QComboBox()
-    c.setFixedWidth(width)
+    if width:
+        c.setFixedWidth(width)
     c.setMaxVisibleItems(14)
+    c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    c.setMinimumContentsLength(12)
+    c.currentIndexChanged.connect(lambda _i, c=c: c.setToolTip(c.currentText()))
     return c
 
 
@@ -48,7 +57,7 @@ def _table(headers: list[str]) -> QTableWidget:
     t = QTableWidget(0, len(headers))
     t.setHorizontalHeaderLabels(headers)
     t.verticalHeader().setVisible(False)
-    t.verticalHeader().setDefaultSectionSize(36)
+    t.verticalHeader().setDefaultSectionSize(40)
     t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
     t.horizontalHeader().setHighlightSections(False)
     t.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -82,6 +91,23 @@ class _NoWheelCombo(QComboBox):
 
     def wheelEvent(self, e):
         e.ignore()
+
+
+class _FocusWheelSpin(QSpinBox):
+    """Spin box that only takes the mouse wheel once clicked into, so scrolling the page can't change it."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, e):
+        if self.hasFocus():
+            super().wheelEvent(e)
+        else:
+            e.ignore()
+
+
+REASONING_SPIN_MIN, REASONING_SPIN_MAX, REASONING_SPIN_DEFAULT = 32, 4096, 256
 
 
 class _DraftCfg:
@@ -172,27 +198,41 @@ class SettingsWindow(QWidget):
         sb = QWidget()
         sb.setObjectName("sidebarBox")
         sb.setAttribute(Qt.WA_StyledBackground, True)
-        sb.setFixedWidth(200)
+        sb.setFixedWidth(212)
         sbl = QVBoxLayout(sb)
-        sbl.setContentsMargins(0, 20, 0, 14)
-        sbl.setSpacing(10)
+        sbl.setContentsMargins(0, 18, 0, 16)
+        sbl.setSpacing(14)
+        brow = QHBoxLayout()
+        brow.setContentsMargins(20, 0, 0, 6)
+        brow.setSpacing(10)
+        mark = QLabel()
+        mark.setObjectName("brandMark")
+        mark.setPixmap(mark_pixmap(24))
+        mark.setFixedSize(24, 24)
+        brow.addWidget(mark)
         brand = QLabel("LocalFlow")
         brand.setObjectName("brand")
-        brand.setContentsMargins(24, 0, 0, 8)
-        sbl.addWidget(brand)
+        brow.addWidget(brand)
+        brow.addStretch(1)
+        sbl.addLayout(brow)
         self.nav = QListWidget()
         self.nav.setObjectName("sidebar")
         self.nav.setFocusPolicy(Qt.NoFocus)
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.nav.setIconSize(QSize(18, 18))
         sbl.addWidget(self.nav, 1)
-        ver = QLabel(f"v{__version__}")
+        ver = QLabel(f"Version {__version__}")
         ver.setProperty("role", "faint")
-        ver.setContentsMargins(24, 0, 0, 0)
+        ver.setContentsMargins(22, 0, 0, 0)
         sbl.addWidget(ver)
         body.addWidget(sb)
 
         self.stack = QStackedWidget()
-        body.addWidget(self.stack, 1)
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
+        right.addWidget(self.stack, 1)
+        body.addLayout(right, 1)
         self._page_index: dict[str, int] = {}
         for key, name, builder in (("home", "Home", self._build_home),
                                    ("transcriptions", "Transcriptions", self._build_transcriptions),
@@ -212,8 +252,9 @@ class SettingsWindow(QWidget):
             idx = self.stack.addWidget(builder())
             self._page_index[key] = idx
             it.setData(Qt.UserRole, idx)
+            it.setIcon(nav_icon(key))
             self.nav.addItem(it)
-        self._settings_pages = {self._page_index[k] for k in ("general", "dictionary", "snippets", "styles", "about")}
+        self._settings_pages = {self._page_index[k] for k in ("general", "dictionary", "snippets", "styles")}
         self.nav.currentRowChanged.connect(self._nav_changed)
 
         # bottom bar (settings pages only)
@@ -222,8 +263,8 @@ class SettingsWindow(QWidget):
         bar.setAttribute(Qt.WA_StyledBackground, True)
         self.bottom_bar = bar
         bl = QHBoxLayout(bar)
-        bl.setContentsMargins(24, 12, 24, 12)
-        bl.setSpacing(10)
+        bl.setContentsMargins(36, 12, 36, 12)
+        bl.setSpacing(8)
         self.saved_label = QLabel("")
         self.saved_label.setObjectName("saved")
         bl.addWidget(self.saved_label)
@@ -233,7 +274,7 @@ class SettingsWindow(QWidget):
         self.btn_save.setDefault(True)
         bl.addWidget(self.btn_close)
         bl.addWidget(self.btn_save)
-        outer.addWidget(bar)
+        right.addWidget(bar)
         self.btn_close.clicked.connect(self.close)
         self.btn_save.clicked.connect(self.save)
 
@@ -288,10 +329,11 @@ class SettingsWindow(QWidget):
         mods = QWidget()
         ml = QHBoxLayout(mods)
         ml.setContentsMargins(0, 0, 0, 0)
-        ml.setSpacing(18)
+        ml.setSpacing(8)
         self.mod_boxes: dict[str, QCheckBox] = {}
         for key, label in (("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift"), ("win", "Win")):
-            cb = QCheckBox(label)
+            cb = KeyChip(label)
+            cb.setObjectName("keyChip")
             cb.setCursor(Qt.PointingHandCursor)
             self.mod_boxes[key] = cb
             ml.addWidget(cb)
@@ -300,12 +342,18 @@ class SettingsWindow(QWidget):
                   "Ctrl+Alt is the default.", mods, stack=True)
         self.handsfree_info = QLineEdit()
         self.handsfree_info.setReadOnly(True)
-        self.handsfree_info.setFixedWidth(250)
-        c.add_row("Hands-free lock", "While holding the hotkey, tap this key to keep recording without "
-                  "holding. Tap the hotkey again to finish. (Edit handsfree_key in config.json.)",
-                  self.handsfree_info)
-        self.mic_combo = _combo(340)
-        c.add_row("Microphone", "Auto follows the Windows default recording device, even when you change it later.", self.mic_combo)
+        self.handsfree_info.setFixedWidth(CONTROL_W)
+        self.handsfree_info.setToolTip("To change it, edit handsfree_key in config.json.")
+        row = c.add_row("Hands-free lock", "While holding the hotkey, tap this key to keep recording without "
+                        "holding. Tap the hotkey again to finish.", self.handsfree_info)
+        row.setToolTip("To change it, edit handsfree_key in config.json.")
+        self.mic_combo = _combo(0)
+        c.add_row("Microphone", "Auto follows the Windows default recording device, even when you change it later.",
+                  self.mic_combo, stack=True)
+        self.outmute_sw = Switch()
+        c.add_row("Mute speakers while dictating", "Mutes your default speakers while you hold the keys, so the "
+                  "microphone only hears your voice. They unmute as soon as you let go. Devices that were already "
+                  "muted stay muted.", self.outmute_sw)
         lay.addWidget(c)
 
         # --- command mode + paste last
@@ -313,16 +361,38 @@ class SettingsWindow(QWidget):
         self.cmd_sw = Switch()
         c.add_row("Voice commands", "Hold the command keys and say what to do, like \"make this more formal\" or "
                   "\"translate to German\". With text selected it rewrites the selection, otherwise it writes the "
-                  "answer at the cursor.", self.cmd_sw)
+                  "answer at the cursor. Ask a question, like \"how many hours from 9 to 5?\", and the answer "
+                  "shows in a card under the bar.", self.cmd_sw)
+        self.ask_sw = Switch()
+        c.add_row("Answer questions in the overlay", "Questions get their answer in a card under the bar instead of "
+                  "being typed. Start with \"ask\" to always get a card, or \"write\" to always type.", self.ask_sw)
+        self.calc_sw = Switch()
+        c.add_row("Calculate with Python", "For conversions and maths, like \"convert one foot to inches\" or "
+                  "\"15% tip on 84 dollars\", the AI writes a small Python script and LocalFlow runs it, so the "
+                  "number is computed exactly instead of guessed.", self.calc_sw)
+        self.speak_sw = Switch()
+        c.add_row("Speak answers", "Reads the answer card out loud. It stops as soon as you start a new recording "
+                  "(tap the dictation keys to silence it). Uses about 2.6 GB of graphics memory while LocalFlow "
+                  "runs, and is turned off in game mode.", self.speak_sw)
+        self.voice_combo = _combo()
+        from .tts import VOICES as _TTS_VOICES
+        for val, lbl in _TTS_VOICES:
+            self.voice_combo.addItem(lbl, val)
+        c.add_row("Voice", "The voice that reads answers. Ryan and Aiden are native English speakers.",
+                  self.voice_combo)
+        self.tts_out_combo = _combo(0)
+        c.add_row("Speak through", "Where spoken answers play. Windows default follows the device you pick in "
+                  "Windows.", self.tts_out_combo, stack=True)
         box = QWidget()
         bl_ = QVBoxLayout(box)
         bl_.setContentsMargins(0, 0, 0, 0)
         bl_.setSpacing(6)
         cm = QHBoxLayout()
-        cm.setSpacing(18)
+        cm.setSpacing(8)
         self.cmd_boxes: dict[str, QCheckBox] = {}
         for key, lbl in (("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift"), ("win", "Win")):
-            cb = QCheckBox(lbl)
+            cb = KeyChip(lbl)
+            cb.setObjectName("keyChip")
             cb.setCursor(Qt.PointingHandCursor)
             self.cmd_boxes[key] = cb
             cm.addWidget(cb)
@@ -340,23 +410,29 @@ class SettingsWindow(QWidget):
         pk = QWidget()
         pkl = QHBoxLayout(pk)
         pkl.setContentsMargins(0, 0, 0, 0)
-        pkl.setSpacing(14)
+        pkl.setSpacing(16)
         pkl.addWidget(self.paste_key)
         pkl.addWidget(self.paste_sw)
-        c.add_row("Paste last transcript", "Press this shortcut to paste your last dictation again. "
-                  "(Change the keys under paste_last in config.json.)", pk)
+        self.paste_key.setToolTip("To change the keys, edit paste_last in config.json.")
+        row = c.add_row("Paste last transcript", "Press this shortcut to paste your last dictation again.", pk)
+        row.setToolTip("To change the keys, edit paste_last in config.json.")
+        self.ac_sw = Switch()
+        c.add_row("Tab autocomplete", "While you type in a chat or email box, a gray guess of your next words "
+                  "appears. Tab adds it, Backspace hides it for that sentence.", self.ac_sw)
         lay.addWidget(c)
         for cb in list(self.mod_boxes.values()) + list(self.cmd_boxes.values()):
             cb.toggled.connect(lambda _v: self._validate_cmd())
         self.cmd_sw.toggled.connect(lambda _v: self._validate_cmd())
+        self.ask_sw.toggled.connect(lambda _v: self._validate_cmd())
+        self.speak_sw.toggled.connect(lambda _v: self._validate_cmd())
 
         # --- speech recognition
         c = Card("Speech recognition")
-        self.lang_combo = _combo(250)
+        self.lang_combo = _combo()
         for code, name in LANGUAGES:
             self.lang_combo.addItem(name, code)
         c.add_row("Language", "Spoken language, or let the model detect it.", self.lang_combo)
-        self.model_combo = _combo(300)
+        self.model_combo = _combo()
         for code, name in MODELS:
             self.model_combo.addItem(name, code)
         c.add_row("Model", "Whisper model. *.en models understand English only. Changing it reloads the model.",
@@ -365,7 +441,7 @@ class SettingsWindow(QWidget):
 
         # --- output
         c = Card("Output")
-        self.insert_combo = _combo(250)
+        self.insert_combo = _combo()
         self.insert_combo.addItem("Paste (clipboard + Ctrl+V)", "paste")
         self.insert_combo.addItem("Type (simulated keystrokes)", "type")
         c.add_row("Insert method", "Paste is fastest and works almost everywhere; typing avoids the clipboard.",
@@ -374,6 +450,9 @@ class SettingsWindow(QWidget):
         c.add_row("Restore clipboard", "Put your previous clipboard contents back after pasting.", self.restore_sw)
         self.space_sw = Switch()
         c.add_row("Add trailing space", "Append a space after each dictation.", self.space_sw)
+        self.nofield_sw = Switch()
+        c.add_row("Copy when no text box", "If nothing you can type into is selected, put the dictation on the "
+                  "clipboard and show a short notice instead.", self.nofield_sw)
         lay.addWidget(c)
 
         # --- AI cleanup
@@ -382,34 +461,56 @@ class SettingsWindow(QWidget):
         c.add_row("Clean up with local AI", "Removes filler words and fixes punctuation using a small local model.",
                   self.cleanup_sw)
         self.llm_combo = _NoWheelCombo()      # the wheel would switch (and reload) models while scrolling
-        self.llm_combo.setFixedWidth(250)
+        self.llm_combo.setFixedWidth(CONTROL_W)
+        self.llm_combo.currentIndexChanged.connect(lambda _i: self.llm_combo.setToolTip(self.llm_combo.currentText()))
         self.llm_combo.activated.connect(self._model_picked)
         c.add_row("Cleanup model", "The local model that does the cleanup (.gguf files in the models folder). "
                   "Applies right away: the model reloads in a few seconds, basic cleanup is used meanwhile.",
                   self.llm_combo)
+        # reasoning: applied on its own (like the model dropdown), never through Save/_collect
+        self.reason_spin = _FocusWheelSpin()
+        self.reason_spin.setRange(REASONING_SPIN_MIN, REASONING_SPIN_MAX)
+        self.reason_spin.setSingleStep(32)
+        self.reason_spin.setSuffix(" tokens")
+        self.reason_spin.setValue(REASONING_SPIN_DEFAULT)
+        self.reason_spin.setFixedWidth(130)
+        self.reason_spin.setToolTip("Most tokens the model may think for before it answers")
+        self.reason_sw = Switch()
+        self._reason_model = ""         # cleanup.model_path the two controls were filled for
+        self._reason_shown = REASONING_SPIN_DEFAULT
+        box = QWidget()
+        hl = QHBoxLayout(box)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(12)
+        hl.addWidget(self.reason_spin)
+        hl.addWidget(self.reason_sw)
+        c.add_row("Reasoning (smarter, slower)", "The model thinks before answering. Better on hard dictations, "
+                  "slower. Applies to the selected model; it reloads.", box)
+        self.reason_sw.toggled.connect(self._reasoning_toggled)
+        self.reason_spin.editingFinished.connect(self._reasoning_budget_edited)
         self.minwords_spin = QSpinBox()
         self.minwords_spin.setRange(0, 50)
         self.minwords_spin.setFixedWidth(90)
         c.add_row("Minimum words", "Utterances shorter than this skip the AI and are inserted as heard.",
                   self.minwords_spin)
         self.stream_sw = Switch()
-        c.add_row("Transcribe while talking", "For long dictations (7 s+), finish sentences in the background at "
-                  "natural pauses so text appears sooner after you release. Thresholds are in config.json under "
-                  "\"streaming\".", self.stream_sw)
+        row = c.add_row("Transcribe while talking", "For long dictations (7 s+), finish sentences in the background "
+                        "at natural pauses so text appears sooner after you release.", self.stream_sw)
+        row.setToolTip("Pause thresholds are in config.json under \"streaming\".")
         lay.addWidget(c)
 
         # --- meetings + transcription
         c = Card("Meetings and audio files")
-        self.meet_mic_combo = _combo(340)
+        self.meet_mic_combo = _combo(0)
         c.add_row("Meeting microphone", "Recorded as You. Same as dictation uses the microphone picked above.",
-                  self.meet_mic_combo)
-        self.meet_out_combo = _combo(340)
+                  self.meet_mic_combo, stack=True)
+        self.meet_out_combo = _combo(0)
         c.add_row("Other people's audio", "The speakers or headset you hear the meeting on. LocalFlow records what "
-                  "plays there as Others.", self.meet_out_combo)
-        self.meet_style_combo = _combo(250)
+                  "plays there as Others.", self.meet_out_combo, stack=True)
+        self.meet_style_combo = _combo()
         c.add_row("Meeting style", "Raw keeps the words as heard. A style runs AI cleanup on each turn.",
                   self.meet_style_combo)
-        self.file_style_combo = _combo(250)
+        self.file_style_combo = _combo()
         c.add_row("Audio file style", "Preselected when you transcribe an audio file.", self.file_style_combo)
         lay.addWidget(c)
 
@@ -418,7 +519,7 @@ class SettingsWindow(QWidget):
         self.hist_sw = Switch()
         c.add_row("Save dictation history", "Keep what you dictate on the Home page. Usage numbers count either way.",
                   self.hist_sw)
-        self.retention_combo = _combo(180)
+        self.retention_combo = _combo()
         for days, lbl in RETENTION_CHOICES:
             self.retention_combo.addItem(lbl, days)
         c.add_row("Keep history for", "Older entries are deleted automatically.", self.retention_combo)
@@ -430,7 +531,7 @@ class SettingsWindow(QWidget):
         self.game_sw = Switch()
         c.add_row("Free the GPU while gaming", "Unloads the speech and cleanup models when a listed game starts and "
                   "reloads them shortly after it closes. Only process names are checked.", self.game_sw)
-        self.game_mode_combo = _combo(250)
+        self.game_mode_combo = _combo()
         self.game_mode_combo.addItem("Dictation off", "off")
         self.game_mode_combo.addItem("Dictation on CPU (basic cleanup)", "cpu")
         c.add_row("While a game runs", "CPU dictation uses a small English model and no AI cleanup.",
@@ -455,9 +556,9 @@ class SettingsWindow(QWidget):
         self.game_edit = QLineEdit()
         self.game_edit.setPlaceholderText("Add a process name...")
         self.game_edit.returnPressed.connect(self._add_game)
-        add = _btn("Add", "primary", 80)
+        add = _btn("Add", icon="plus", role="mini")
         add.clicked.connect(self._add_game)
-        rm = _btn("Remove selected", "danger")
+        rm = _btn("Remove selected", "ghostDanger", icon="trash")
         rm.clicked.connect(self._remove_games)
         r.addWidget(self.game_edit, 1)
         r.addWidget(add)
@@ -478,7 +579,7 @@ class SettingsWindow(QWidget):
         vl.setSpacing(10)
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.setRange(0, 100)
-        self.vol_slider.setFixedWidth(190)
+        self.vol_slider.setFixedWidth(CONTROL_W - 50)
         self.vol_label = QLabel("25%")
         self.vol_label.setFixedWidth(40)
         self.vol_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -516,9 +617,9 @@ class SettingsWindow(QWidget):
         self.word_edit = QLineEdit()
         self.word_edit.setPlaceholderText("Add a word or phrase...")
         self.word_edit.returnPressed.connect(self._add_word)
-        add = _btn("Add", "primary", 80)
+        add = _btn("Add", icon="plus", role="mini")
         add.clicked.connect(self._add_word)
-        rm = _btn("Remove selected", "danger")
+        rm = _btn("Remove selected", "ghostDanger", icon="trash")
         rm.clicked.connect(self._remove_words)
         r.addWidget(self.word_edit, 1)
         r.addWidget(add)
@@ -542,9 +643,9 @@ class SettingsWindow(QWidget):
         rl.addWidget(self.repl_table)
         r = QHBoxLayout()
         r.setSpacing(8)
-        add = _btn("Add rule", "mini")
+        add = _btn("Add rule", "mini", icon="plus")
         add.clicked.connect(lambda: self._add_table_row(self.repl_table, "", ""))
-        rm = _btn("Remove selected", "mini")
+        rm = _btn("Remove selected", "ghostDanger", icon="trash")
         rm.clicked.connect(lambda: self._remove_table_row(self.repl_table))
         r.addWidget(add)
         r.addWidget(rm)
@@ -570,9 +671,9 @@ class SettingsWindow(QWidget):
         sl.addWidget(self.snip_table)
         r = QHBoxLayout()
         r.setSpacing(8)
-        add = _btn("Add snippet", "mini")
+        add = _btn("Add snippet", "mini", icon="plus")
         add.clicked.connect(self._add_snippet)
-        rm = _btn("Remove selected", "mini")
+        rm = _btn("Remove selected", "ghostDanger", icon="trash")
         rm.clicked.connect(lambda: self._remove_table_row(self.snip_table))
         r.addWidget(add)
         r.addWidget(rm)
@@ -635,26 +736,28 @@ class SettingsWindow(QWidget):
 
         r = QHBoxLayout()
         r.setSpacing(8)
-        self.btn_rule_add = _btn("Add rule", "mini")
+        self.btn_rule_add = _btn("Add rule", "mini", icon="plus")
         self.btn_rule_add.clicked.connect(self._add_rule)
-        self.btn_rule_last = _btn("Add rule for last used app", "mini")
+        self.btn_rule_last = _btn("Add rule for last used app", "mini", icon="plus")
         self.btn_rule_last.clicked.connect(self._add_last_app_rule)
-        self.btn_rule_rm = _btn("Remove", "mini")
+        self.btn_rule_rm = _btn("Remove", "ghostDanger", icon="trash", tip="Remove the selected rule")
         self.btn_rule_rm.clicked.connect(self._remove_rule)
-        self.btn_rule_up = _btn("Move up", "mini")
+        self.btn_rule_up = _btn("", icon="up", tip="Move the selected rule up")
         self.btn_rule_up.clicked.connect(lambda: self._move_rule(-1))
-        self.btn_rule_down = _btn("Move down", "mini")
+        self.btn_rule_down = _btn("", icon="down", tip="Move the selected rule down")
         self.btn_rule_down.clicked.connect(lambda: self._move_rule(1))
+        for b in (self.btn_rule_up, self.btn_rule_down):
+            b.setFixedSize(32, 32)
+            b.setProperty("role", "iconBox")
         for b in (self.btn_rule_add, self.btn_rule_last):
             r.addWidget(b)
         r.addStretch(1)
-        pl.addLayout(r)
-        r = QHBoxLayout()
-        r.setSpacing(8)
-        for b in (self.btn_rule_up, self.btn_rule_down, self.btn_rule_rm):
+        for b in (self.btn_rule_up, self.btn_rule_down):
             r.addWidget(b)
-        r.addStretch(1)
+        r.addSpacing(4)
+        r.addWidget(self.btn_rule_rm)
         pl.addLayout(r)
+        pl.addSpacing(8)
 
         t = QLabel("Test a window (uses the rules above, even before saving)")
         t.setObjectName("rowDesc")
@@ -663,10 +766,11 @@ class SettingsWindow(QWidget):
         tr.setSpacing(8)
         self.test_exe = QLineEdit()
         self.test_exe.setPlaceholderText("Process, e.g. chrome.exe")
-        self.test_exe.setFixedWidth(190)
+        self.test_exe.setFixedWidth(200)
         self.test_title = QLineEdit()
         self.test_title.setPlaceholderText("Window title, e.g. Inbox - Gmail - Google Chrome")
         self.test_result = QLabel("")
+        self.test_result.setObjectName("testIdle")
         self.test_result.setMinimumWidth(180)
         tr.addWidget(self.test_exe)
         tr.addWidget(self.test_title, 1)
@@ -702,9 +806,9 @@ class SettingsWindow(QWidget):
         sl.addWidget(self.style_table)
         r = QHBoxLayout()
         r.setSpacing(8)
-        ob = _btn("Open config.json", "mini")
+        ob = _btn("Open config.json", "mini", icon="folder")
         ob.clicked.connect(self._open_config)
-        rb = _btn("Reset profiles to defaults", "danger")
+        rb = _btn("Reset profiles to defaults", "ghostDanger")
         rb.clicked.connect(self._reset_profiles)
         r.addWidget(ob)
         r.addWidget(rb)
@@ -744,7 +848,7 @@ class SettingsWindow(QWidget):
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 it.setToolTip(txt)
                 self.style_table.setItem(r, col, it)
-        self.style_table.setMinimumHeight(min(280, 44 + 36 * len(self._style_names)))
+        self.style_table.setMinimumHeight(min(330, 48 + 40 * len(self._style_names)))
         self._refresh_last_ctx()
 
     def _rebuild_rules(self, select: int | None = None) -> None:
@@ -892,7 +996,10 @@ class SettingsWindow(QWidget):
             except Exception as e:  # never let a bad rule break typing
                 txt, ok = f"error: {e}", False
         self.test_result.setText(txt)
-        self.test_result.setStyleSheet(f"color: {ACCENT_TEXT}; font-weight: 600;" if ok else f"color: {MUTED};")
+        name = "testOk" if ok else "testIdle"
+        if self.test_result.objectName() != name:
+            self.test_result.setObjectName(name)
+            repolish(self.test_result)
 
     def _collect_profiles(self) -> list[dict] | None:
         """Rule list for saving, or None (with a message) when a rule has an invalid title regex."""
@@ -919,13 +1026,14 @@ class SettingsWindow(QWidget):
             out.append(r)
         return out
 
-    def _confirm(self, title: str, text: str) -> bool:
-        return QMessageBox.question(self, title, text, QMessageBox.Yes | QMessageBox.No,
-                                    QMessageBox.No) == QMessageBox.Yes
+    def _confirm(self, title: str, text: str, ok_text: str = "Yes") -> bool:
+        """Themed yes/no (theme.ConfirmDialog). The first line is the question, the rest the detail."""
+        head, _, rest = text.partition("\n")
+        return _theme_confirm(self, title, head, ok_text, rest.strip(), danger=True)
 
     def _reset_profiles(self) -> None:
         if not self._confirm("Reset profiles", "Replace all profile rules with the built-in defaults?\n"
-                             "Your own rules are discarded when you press Save."):
+                             "Your own rules are discarded when you press Save.", "Reset profiles"):
             return
         self._rules = copy.deepcopy(_styles.DEFAULT_PROFILES)
         self._rebuild_rules()
@@ -950,7 +1058,7 @@ class SettingsWindow(QWidget):
             le = QLineEdit(str(path))
             le.setReadOnly(True)
             le.setCursorPosition(0)
-            ob = _btn("Show in folder", "mini")
+            ob = _btn("Show in folder", "mini", icon="folder")
             ob.clicked.connect(lambda _=False, p=path: self._reveal(p))
             bl.addWidget(le, 1)
             bl.addWidget(ob)
@@ -1111,6 +1219,7 @@ class SettingsWindow(QWidget):
         _set_combo_data(self.insert_combo, cfg.get("insert.mode", "paste"))
         self.restore_sw.setChecked(bool(cfg.get("insert.restore_clipboard", True)))
         self.space_sw.setChecked(bool(cfg.get("insert.trailing_space", False)))
+        self.nofield_sw.setChecked(bool(cfg.get("insert.copy_when_no_field", True)))
         self.cleanup_sw.setChecked(bool(cfg.get("cleanup.enabled", True)))
         self.stream_sw.setChecked(bool(cfg.get("streaming.enabled", True)))
         self.game_sw.setChecked(bool(cfg.get("game_mode.enabled", True)))
@@ -1122,6 +1231,7 @@ class SettingsWindow(QWidget):
         self._fill_models()
         self.overlay_sw.setChecked(bool(cfg.get("ui.overlay", True)))
         self.sounds_sw.setChecked(bool(cfg.get("ui.sounds", True)))
+        self.outmute_sw.setChecked(bool(cfg.get("audio.mute_output_while_dictating", True)))
         self.vol_slider.setValue(int(round(float(cfg.get("ui.sound_volume", 0.25)) * 100)))
         try:
             self.autostart_sw.setChecked(bool(self._autostart_get()))
@@ -1193,10 +1303,12 @@ class SettingsWindow(QWidget):
         return {
             "hotkey": "+".join(mods),
             "mic": {"device": self.mic_combo.currentData() or ""},
+            "audio": {"mute_output_while_dictating": self.outmute_sw.isChecked()},
             "stt": {"model": self.model_combo.currentData(), "language": self.lang_combo.currentData()},
             "insert": {"mode": self.insert_combo.currentData(),
                        "restore_clipboard": self.restore_sw.isChecked(),
-                       "trailing_space": self.space_sw.isChecked()},
+                       "trailing_space": self.space_sw.isChecked(),
+                       "copy_when_no_field": self.nofield_sw.isChecked()},
             "cleanup": {"enabled": self.cleanup_sw.isChecked(), "min_words": self.minwords_spin.value()},
             "streaming": {"enabled": self.stream_sw.isChecked()},
             "game_mode": {"enabled": self.game_sw.isChecked(), "processes": games,
@@ -1208,8 +1320,14 @@ class SettingsWindow(QWidget):
             "auto_style": self.auto_sw.isChecked(),
             "profiles": profiles,
             # an invalid combo with command mode off is not saved (the stored one stays)
-            "command_mode": {"enabled": cmd_on, **({"hotkey": "+".join(cmd_mods)} if not err else {})},
+            "command_mode": {"enabled": cmd_on, "answer_questions": self.ask_sw.isChecked(),
+                             "run_python": self.calc_sw.isChecked(),
+                             "speak_answers": self.speak_sw.isChecked(),
+                             "tts_voice": self.voice_combo.currentData() or "Ryan",
+                             "tts_device": self.tts_out_combo.currentData() or "",
+                             **({"hotkey": "+".join(cmd_mods)} if not err else {})},
             "paste_last": {"enabled": self.paste_sw.isChecked()},
+            "autocomplete": {"enabled": self.ac_sw.isChecked()},
             "meetings": {"mic": self.meet_mic_combo.currentData() or "",
                          "output_device": self.meet_out_combo.currentData() or "",
                          "style": self.meet_style_combo.currentData() or "raw"},
@@ -1226,6 +1344,12 @@ class SettingsWindow(QWidget):
         on = self.cmd_sw.isChecked()
         for cb in self.cmd_boxes.values():
             cb.setEnabled(on)
+        self.ask_sw.setEnabled(on)
+        self.calc_sw.setEnabled(on)
+        speak = on and self.ask_sw.isChecked()
+        self.speak_sw.setEnabled(speak)
+        self.voice_combo.setEnabled(speak and self.speak_sw.isChecked())
+        self.tts_out_combo.setEnabled(speak and self.speak_sw.isChecked())
         self.cmd_error.setText(err)
         self.cmd_error.setVisible(bool(err) and on)
         return err
@@ -1235,7 +1359,15 @@ class SettingsWindow(QWidget):
         for k, cb in self.cmd_boxes.items():
             cb.setChecked(k in cmd)
         self.cmd_sw.setChecked(bool(cfg.get("command_mode.enabled", True)))
+        self.ask_sw.setChecked(bool(cfg.get("command_mode.answer_questions", True)))
+        self.calc_sw.setChecked(bool(cfg.get("command_mode.run_python", True)))
+        self.speak_sw.setChecked(bool(cfg.get("command_mode.speak_answers", True)))
+        v = str(cfg.get("command_mode.tts_voice", "Ryan") or "Ryan")
+        i = next((k for k in range(self.voice_combo.count())
+                  if str(self.voice_combo.itemData(k)).lower() == v.lower()), 0)
+        self.voice_combo.setCurrentIndex(i)
         self.paste_sw.setChecked(bool(cfg.get("paste_last.enabled", True)))
+        self.ac_sw.setChecked(bool(cfg.get("autocomplete.enabled", True)))
         self.paste_key.setText(fmt_chord(cfg.get("paste_last.hotkey", "alt+shift+z")) or "-")
         self._validate_cmd()
 
@@ -1264,6 +1396,15 @@ class SettingsWindow(QWidget):
             _set_combo_data(self.meet_out_combo, o, f"{o} (not connected)")
         else:
             self.meet_out_combo.setCurrentIndex(0)
+        self.tts_out_combo.clear()
+        self.tts_out_combo.addItem(f"Windows default ({d_out})" if d_out else "Windows default output", "")
+        for n in devs.get("outputs", []) or []:
+            self.tts_out_combo.addItem(n, n)
+        o = cfg.get("command_mode.tts_device", "") or ""
+        if o:
+            _set_combo_data(self.tts_out_combo, o, f"{o} (not connected)")
+        else:
+            self.tts_out_combo.setCurrentIndex(0)
         names = transcript_style_names(cfg)
         for combo, key in ((self.meet_style_combo, "meetings.style"), (self.file_style_combo, "transcripts.file_style")):
             combo.clear()
@@ -1297,6 +1438,92 @@ class SettingsWindow(QWidget):
             combo.setCurrentIndex(idx)
         finally:
             combo.blockSignals(False)
+        self._fill_reasoning()
+
+    def refresh_cleanup_model(self) -> None:
+        """The cleanup model changed elsewhere (tray): show it and its reasoning setting."""
+        self._fill_models()
+
+    # ----- reasoning (cleanup.model_reasoning[<model file>]) -----
+    def _reasoning_entry(self) -> tuple[str, str, Optional[str], dict]:
+        """(model path, model file name, existing key matching it case-insensitively or None, the map)."""
+        path = str(self.config.get("cleanup.model_path", "") or "")
+        fname = Path(path).name if path else ""
+        table = self.config.get("cleanup.model_reasoning", {})
+        table = table if isinstance(table, dict) else {}
+        key = next((k for k in table if fname and str(k).lower() == fname.lower()), None)
+        return path, fname, key, table
+
+    def _fill_reasoning(self) -> None:
+        path, fname, key, table = self._reasoning_entry()
+        entry = table.get(key) if key is not None else None
+        entry = entry if isinstance(entry, dict) else {}
+        try:
+            budget = int(entry.get("budget", REASONING_SPIN_DEFAULT))
+        except (TypeError, ValueError, OverflowError):
+            budget = REASONING_SPIN_DEFAULT
+        budget = max(REASONING_SPIN_MIN, min(REASONING_SPIN_MAX, budget))
+        for w in (self.reason_sw, self.reason_spin):
+            w.blockSignals(True)
+        try:
+            self.reason_sw.setChecked(entry.get("enabled") is True)
+            self.reason_spin.setValue(budget)
+        finally:
+            for w in (self.reason_sw, self.reason_spin):
+                w.blockSignals(False)
+        self._reason_model = path
+        self._reason_shown = self.reason_spin.value()
+        self.reason_sw.setEnabled(bool(fname))
+        self.reason_spin.setEnabled(bool(fname))
+
+    def _reasoning_stale(self) -> bool:
+        """The model changed since the controls were filled (tray switch): show the new model's setting instead."""
+        if same_model(self._reason_model, self.config.get("cleanup.model_path", "")) or \
+                self._reason_model == self.config.get("cleanup.model_path", ""):
+            return False
+        self._fill_models()
+        self._flash("The cleanup model changed - showing its setting", ok=False)
+        return True
+
+    def _write_reasoning(self, enabled: bool, budget: int) -> bool:
+        path, fname, key, table = self._reasoning_entry()
+        if not fname:
+            return False
+        table = copy.deepcopy(table)
+        k = key if key is not None else fname
+        entry = dict(table[k]) if isinstance(table.get(k), dict) else {}
+        entry["enabled"] = bool(enabled)
+        entry["budget"] = int(budget)
+        table[k] = entry
+        try:
+            self.config.set("cleanup.model_reasoning", table)     # saved; the app restarts llama-server
+        except Exception as e:
+            self._flash(f"Could not change reasoning: {e}", ok=False)
+            return False
+        return True
+
+    def _reasoning_toggled(self, on: bool) -> None:
+        if self._reasoning_stale():
+            return
+        if self._write_reasoning(on, self.reason_spin.value()):
+            self._reason_shown = self.reason_spin.value()
+            name = model_display_name(self._reason_model)
+            self._flash(f"Reasoning {'on' if on else 'off'} - reloading {name}...", ok=True)
+
+    def _reasoning_budget_edited(self) -> None:
+        v = self.reason_spin.value()
+        if v == self._reason_shown:
+            return
+        if self._reasoning_stale():
+            return
+        on = self.reason_sw.isChecked()
+        if self._write_reasoning(on, v):     # while off it is only saved: the app reloads when the budget in use changes
+            self._reason_shown = v
+            if on:
+                self._flash(f"Reasoning budget {v} tokens - reloading {model_display_name(self._reason_model)}...",
+                            ok=True)
+            else:
+                self._flash(f"Reasoning budget set to {v} tokens (used when reasoning is on)", ok=True)
 
     def _model_picked(self, i: int) -> None:
         # applied on its own (not through Save/_collect), so a stale dropdown can never undo a tray switch
@@ -1308,6 +1535,7 @@ class SettingsWindow(QWidget):
         except Exception as e:
             self._flash(f"Could not switch model: {e}", ok=False)
             return
+        self._fill_reasoning()
         self._flash(f"Loading {model_display_name(path)}...", ok=True)
 
     def save(self) -> bool:

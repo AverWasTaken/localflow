@@ -7,10 +7,12 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
-from .theme import DARK_QSS, btn as _btn, enable_dark_titlebar, style_window  # noqa: F401  (DARK_QSS re-exported)
+from .icons import check_icon, muted_icon
+from .theme import DARK_QSS, btn as _btn, enable_dark_titlebar, set_btn_icon, style_window  # noqa: F401  (DARK_QSS re-exported)
+from .theme import ICON_GAP, confirm as _theme_confirm
 from .uifmt import fmt_when as _fmt_ts  # noqa: F401  (kept for older imports)
 
 MAX_ENTRIES = 200
@@ -24,25 +26,32 @@ def _nice_app(app: str) -> str:
 
 
 def confirm(parent, title: str, text: str, ok_label: str, info: str = "") -> bool:
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Warning)
-    box.setWindowTitle(title)
-    box.setText(text)
-    if info:
-        box.setInformativeText(info)
-    box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
-    box.setDefaultButton(QMessageBox.Cancel)
-    box.button(QMessageBox.Yes).setText(ok_label)
-    return box.exec() == QMessageBox.Yes
+    """Themed confirm dialog (theme.ConfirmDialog): Cancel is the default, Esc cancels. True = confirmed."""
+    return _theme_confirm(parent, title, text, ok_label, info, danger=True)
 
 
 def flash_copied(btn: QPushButton, label: str) -> None:
-    btn.setText("Copied")
-    QTimer.singleShot(1100, btn, lambda: btn.setText(label))   # cancelled if the button is deleted
+    """Show that a copy worked: the icon turns into a green check (and the text, if any, reads "Copied")."""
+    name = btn.property("iconName") or ""
+    if btn.property("baseTip") is None:
+        btn.setProperty("baseTip", btn.toolTip())
+    if name:
+        btn.setIcon(check_icon(16) if not btn.text() else check_icon(15, pad=ICON_GAP))
+    if btn.text():
+        btn.setText("Copied")
+    btn.setToolTip("Copied")
+
+    def restore():
+        if name:
+            set_btn_icon(btn, name)
+        if btn.text():
+            btn.setText(label)
+        btn.setToolTip(str(btn.property("baseTip") or ""))
+    QTimer.singleShot(1100, btn, restore)   # cancelled if the button is deleted
 
 
 class _Entry(QFrame):
-    """One dictation: when + app + style, the inserted text, the raw transcript when it differs, timing, actions."""
+    """One dictation: app + style + when + actions, the inserted text, the raw transcript when it differs, timing."""
 
     def __init__(self, row: dict, on_delete):
         super().__init__()
@@ -50,68 +59,65 @@ class _Entry(QFrame):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self._row = row
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 14, 4, 12)
+        lay.setContentsMargins(18, 12, 12, 14)
         lay.setSpacing(6)
+
+        cleaned = (row.get("cleaned") or "").strip()
+        raw = (row.get("raw") or "").strip()
 
         head = QHBoxLayout()
         head.setSpacing(8)
-        ts = QLabel(_fmt_ts(row.get("ts", 0)))
-        ts.setProperty("role", "muted")
-        ts.setStyleSheet("font-size: 12px;")
-        head.addWidget(ts)
         app = _nice_app(row.get("app", ""))
         if app:
-            chip = QLabel(app)
-            chip.setObjectName("chipAccent")
+            a = QLabel(app)
+            a.setObjectName("entryApp")
             if row.get("title"):
-                chip.setToolTip(str(row["title"]))
-            head.addWidget(chip)
+                a.setToolTip(str(row["title"]))
+            head.addWidget(a)
         style = (row.get("style") or "").strip()
         if style:
             sc = QLabel(style)
             sc.setObjectName("chip")
-            head.addWidget(sc)
+            head.addWidget(sc, 0, Qt.AlignVCenter)
         head.addStretch(1)
+        ts = QLabel(_fmt_ts(row.get("ts", 0)))
+        ts.setProperty("role", "faint")
+        head.addWidget(ts)
+        head.addSpacing(6)
+        self.copy_btn = _btn("", icon="copy", tip="Copy the inserted text")
+        self.copy_btn.clicked.connect(lambda: self._copy(cleaned or raw, self.copy_btn, ""))
+        head.addWidget(self.copy_btn)
+        self.raw_btn = _btn("", icon="mic", tip="Copy what the speech model heard (before cleanup)")
+        self.raw_btn.clicked.connect(lambda: self._copy(raw or cleaned, self.raw_btn, ""))
+        head.addWidget(self.raw_btn)
+        self.del_btn = _btn("", "iconDanger", icon="trash", tip="Delete from history")
+        self.del_btn.clicked.connect(lambda: on_delete(row["id"]))
+        head.addWidget(self.del_btn)
         lay.addLayout(head)
 
-        cleaned = (row.get("cleaned") or "").strip()
-        raw = (row.get("raw") or "").strip()
         main = QLabel(cleaned or raw or "(empty)")
+        main.setObjectName("entryText")
         main.setWordWrap(True)
         main.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        main.setStyleSheet("font-size: 14px; line-height: 140%;")
         main.setCursor(Qt.IBeamCursor)
         main.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)   # wrap instead of widening the page
+        main.setContentsMargins(0, 0, 6, 0)
         lay.addWidget(main)
 
         if raw and raw != cleaned:
             r = QLabel(raw)
+            r.setObjectName("entryRaw")
             r.setWordWrap(True)
             r.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            r.setProperty("role", "faint")
-            r.setStyleSheet("font-style: italic;")
             r.setToolTip("What the speech model heard, before cleanup")
             r.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            r.setContentsMargins(0, 0, 6, 0)
             lay.addWidget(r)
 
-        bottom = QHBoxLayout()
-        bottom.setSpacing(2)
         timing = QLabel(self._timing_text(row))
         timing.setProperty("role", "faint")
-        bottom.addWidget(timing)
-        bottom.addStretch(1)
-        self.copy_btn = _btn("Copy", "ghost")
-        self.copy_btn.setToolTip("Copy the inserted text")
-        self.copy_btn.clicked.connect(lambda: self._copy(cleaned or raw, self.copy_btn, "Copy"))
-        bottom.addWidget(self.copy_btn)
-        self.raw_btn = _btn("Copy raw", "ghost")
-        self.raw_btn.setToolTip("Copy what the speech model heard")
-        self.raw_btn.clicked.connect(lambda: self._copy(raw or cleaned, self.raw_btn, "Copy raw"))
-        bottom.addWidget(self.raw_btn)
-        self.del_btn = _btn("Delete", "ghostDanger")
-        self.del_btn.clicked.connect(lambda: on_delete(row["id"]))
-        bottom.addWidget(self.del_btn)
-        lay.addLayout(bottom)
+        lay.addSpacing(2)
+        lay.addWidget(timing)
 
     @staticmethod
     def _timing_text(row: dict) -> str:
@@ -150,7 +156,7 @@ class HistoryList(QWidget):
         self._cards: dict = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(12)
+        outer.setSpacing(14)
 
         top = QHBoxLayout()
         top.setSpacing(10)
@@ -166,28 +172,30 @@ class HistoryList(QWidget):
         self.search.setPlaceholderText("Search history")
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(260)
+        self.search.addAction(muted_icon("search", 15), QLineEdit.LeadingPosition)
         top.addWidget(self.search)
-        self.btn_clear = _btn("Clear all", "danger")
+        top.addSpacing(4)
+        self.btn_clear = _btn("Clear all", "ghostDanger", icon="trash", tip="Delete every entry in the history")
         top.addWidget(self.btn_clear)
         outer.addLayout(top)
 
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("listPanel")
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.inner = QWidget()
         self.inner.setObjectName("pageInner")
         self.vbox = QVBoxLayout(self.inner)
-        self.vbox.setContentsMargins(0, 0, 10, 0)
+        self.vbox.setContentsMargins(0, 2, 2, 2)
         self.vbox.setSpacing(0)
         self.scroll.setWidget(self.inner)
         outer.addWidget(self.scroll, 1)
 
         self.empty = QLabel("")
+        self.empty.setObjectName("emptyState")
         self.empty.setAlignment(Qt.AlignCenter)
-        self.empty.setProperty("role", "muted")
         self.empty.setWordWrap(True)
-        self.empty.setStyleSheet("font-size: 14px; padding: 48px 12px;")
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)

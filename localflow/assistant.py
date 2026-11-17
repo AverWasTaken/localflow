@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 import requests
 
-from .cleanup import strip_think
+from .cleanup import strip_think, thinking_tokens
 
 log = logging.getLogger(__name__)
 
@@ -119,17 +119,31 @@ def _visible(acc: str) -> str:
 
 class Assistant:
     def __init__(self, cfg_get: Callable, gate, store, base_url_fn: Callable[[], str], is_ready_fn: Callable[[], bool],
-                 request_extra_fn: Optional[Callable[[], dict]] = None, session: Optional[requests.Session] = None):
+                 request_extra_fn: Optional[Callable[[], dict]] = None, session: Optional[requests.Session] = None,
+                 reasoning_budget_fn: Optional[Callable[[], int]] = None):
         self.cfg_get = cfg_get
         self.gate = gate
         self.store = store
         self.base_url_fn = base_url_fn
         self.is_ready_fn = is_ready_fn
         self.request_extra_fn = request_extra_fn
+        # thinking-token budget of the running llama-server (0 = reasoning off): requests then let the model think
+        # and reserve that many extra tokens for it
+        self.reasoning_budget_fn = reasoning_budget_fn
         self.http = session or requests.Session()
         self.retry_sleep_s = 2.0
         self.ready_poll_s = 1.0
         self.requests_made = 0          # for tests / diagnostics
+
+    def _reasoning_budget(self) -> int:
+        """Extra tokens reserved for the model's thinking (0 = off): the running server's whole budget, since the
+        server lets the model think that long before it answers."""
+        if not self.reasoning_budget_fn:
+            return 0
+        try:
+            return thinking_tokens(max(0, int(self.reasoning_budget_fn() or 0)))     # budget + forced-end overhead
+        except Exception:
+            return 0
 
     def _get(self, key: str, default):
         try:
@@ -173,22 +187,37 @@ class Assistant:
         ctx = int(self._get("cleanup.ctx", 8192))
         max_tokens = int(self._get("assistant.max_tokens", 1024))
         max_tokens = max(64, min(max_tokens, ctx // 3))
+        think = self._reasoning_budget()        # each request also generates up to this many thinking tokens
+
+        def fit(prompt_chars: int, tokens: int) -> int:
+            try:
+                return budget_chars(ctx, prompt_chars, tokens + think)
+            except AssistantError:
+                if think > 0:
+                    budget_chars(ctx, prompt_chars, tokens)     # fits without thinking: the budget is to blame
+                    raise AssistantError("The reasoning budget is too large for the AI model's context. Lower it "
+                                         "in Settings > AI cleanup.") from None
+                raise
+
+        def complete(messages, tokens, partial):
+            return self._complete(messages, tokens, stop, partial, on_status, think_cap=think)
+
         overhead = len(SYSTEM) + len(REDUCE_INSTRUCTION) + len(MAP_INSTRUCTION) + len(request) + 64
-        single = budget_chars(ctx, len(SYSTEM) + len(request) + 64, max_tokens)
+        single = fit(len(SYSTEM) + len(request) + 64, max_tokens)
         if len(text) <= single:
-            return self._complete(self._messages(text, request), max_tokens, stop, on_partial, on_status)
-        reduce_limit = budget_chars(ctx, overhead, max_tokens)
+            return complete(self._messages(text, request), max_tokens, on_partial)
+        reduce_limit = fit(overhead, max_tokens)
         # notes are capped so that at least 3 of them (at ~4 chars/token, worst case) fit in one combine request:
         # every combine round therefore shrinks the notes and nothing is ever cut off
         note_tokens = int(self._get("assistant.note_tokens", 600))
         note_tokens = max(48, min(note_tokens, int(reduce_limit / 4.0 / 3)))
-        limit = budget_chars(ctx, overhead, note_tokens)
+        limit = fit(overhead, note_tokens)
         chunks = chunk_text(text, limit)
         notes: list[str] = []
         for i, ch in enumerate(chunks, 1):
             self._status(on_status, f"Reading part {i} of {len(chunks)}")
             instr = MAP_INSTRUCTION.format(i=i, n=len(chunks), request=request)
-            notes.append(self._complete(self._messages(ch, instr), note_tokens, stop, None, on_status))
+            notes.append(complete(self._messages(ch, instr), note_tokens, None))
         # combine; if the notes themselves are too long, merge them in groups first (each round shrinks them)
         level = 0
         while len("\n\n".join(notes)) > reduce_limit and level < 8:
@@ -199,16 +228,15 @@ class Assistant:
                 self._status(on_status, f"Combining notes {gi} of {len(groups)}")
                 instr = REDUCE_INSTRUCTION.format(request="merge these notes into one compact set of notes, "
                                                           "keeping every relevant detail for: " + request)
-                merged.append(self._complete(self._messages(g, instr, tag="notes"), note_tokens, stop, None,
-                                             on_status))
+                merged.append(complete(self._messages(g, instr, tag="notes"), note_tokens, None))
             notes = merged
         joined = "\n\n".join(notes)
         if len(joined) > reduce_limit:            # practically unreachable (see note_tokens); never overflow
             log.warning("assistant notes still too long after %d combine rounds - truncating", level)
             joined = joined[:reduce_limit]
         self._status(on_status, "Writing the answer")
-        return self._complete(self._messages(joined, REDUCE_INSTRUCTION.format(request=request), tag="notes"),
-                              max_tokens, stop, on_partial, on_status)
+        return complete(self._messages(joined, REDUCE_INSTRUCTION.format(request=request), tag="notes"),
+                        max_tokens, on_partial)
 
     # ------------------------------------------------------------------ internals
     @staticmethod
@@ -257,7 +285,7 @@ class Assistant:
             except Exception:
                 pass
 
-    def _body(self, messages: list[dict], max_tokens: int) -> dict:
+    def _body(self, messages: list[dict], max_tokens: int, think: Optional[int] = None) -> dict:
         body = {"messages": messages, "stream": True, "max_tokens": int(max_tokens),
                 "temperature": float(self._get("assistant.temperature", 0.3)), "top_p": 0.9,
                 "cache_prompt": True, "chat_template_kwargs": {"enable_thinking": False}}
@@ -269,18 +297,32 @@ class Assistant:
             for k, v in extra.items():
                 if k not in ("messages", "stream", "max_tokens", "temperature", "stop", "n_predict"):
                     body[k] = v
+        if think is None:
+            think = self._reasoning_budget()
+        if think > 0:
+            # the model thinks first (streamed as reasoning_content, which is not shown), then answers
+            ctk = body.get("chat_template_kwargs")
+            ctk = dict(ctk) if isinstance(ctk, dict) else {}
+            ctk["enable_thinking"] = True
+            body["chat_template_kwargs"] = ctk
+            body["max_tokens"] = int(max_tokens) + think
         return body
 
     def _complete(self, messages: list[dict], max_tokens: int, stop: threading.Event,
-                  on_partial: Optional[Callable[[str], None]], on_status) -> str:
+                  on_partial: Optional[Callable[[str], None]], on_status, think_cap: Optional[int] = None) -> str:
+        """``think_cap``: the thinking budget run() sized the request for. If the server was reloaded with a larger
+        one meanwhile, the request could overflow the context, so it fails instead (a smaller one is fine)."""
         errors = 0
         while True:
             self._wait_ready(stop, on_status)
+            think = self._reasoning_budget()        # the server answering now (it may have been reloaded)
+            if think_cap is not None and think > think_cap:
+                raise AssistantError("The AI model's reasoning setting changed while this was running. Try again.")
             preempted = False
             acc = ""
             try:
                 self.requests_made += 1
-                with self.http.post(self.base_url_fn() + "/v1/chat/completions", json=self._body(messages, max_tokens),
+                with self.http.post(self.base_url_fn() + "/v1/chat/completions", json=self._body(messages, max_tokens, think),
                                     stream=True, timeout=(5, 120)) as r:
                     r.raise_for_status()
                     finish = None

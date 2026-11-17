@@ -1,4 +1,5 @@
 .venv/
+.venv-tts/
 bin/
 models/
 __pycache__/

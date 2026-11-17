@@ -42,7 +42,13 @@ Inspired by Wispr Flow. Not affiliated.
 - Custom dictionary (words and replacement rules) and snippets (say a phrase, get a block of text).
 - Uses your Windows default microphone and follows it when you change it. Optional per-device override.
 - Command mode: hold Ctrl+Win and say an instruction ("make this more formal", "translate to German"). With text
-  selected it rewrites the selection, otherwise it writes the answer at the cursor.
+  selected it rewrites the selection, otherwise it writes the answer at the cursor. Ask a question the same way
+  ("how many hours is it from 7:30am to 5pm?", "what does this mean?") and the answer shows in a small card under the
+  bar instead of being typed (time spans and simple math are worked out exactly; Settings > Command mode turns it off).
+  With an NVIDIA GPU the answer is also read aloud (Qwen3-TTS 0.6B, voice Ryan by default, at most ~30 s; it stops
+  when you start a new recording, so tap the dictation keys to silence it). Settings > Command mode > "Speak answers".
+  It keeps about 2.6 GB of GPU memory while LocalFlow runs (none in game mode or while paused) and needs the optional
+  voice install (`scripts\install-tts.ps1`, about 10 GB: `.venv-tts` + `models\tts`).
 - Paste last: Alt+Shift+Z (or tray > Paste last transcript) types your last dictation again.
 - Meetings and transcriptions: record a meeting (your mic plus the computer's audio) or transcribe an audio/video
   file, then get a local AI summary, bullet points and action items, or ask questions about it.
@@ -123,7 +129,9 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 dependencies, downloads the llama.cpp CUDA build, the Qwen3.5-4B Q8_0 model (from Hugging Face) and the Whisper
 model, then registers a Task Scheduler task called `LocalFlow` and starts it. Downloads from GitHub are checked
 against pinned SHA-256 hashes. Re-running it repairs a broken install. Flags: `-SkipModel` (no cleanup model),
-`-NoTask` (no startup task, no admin prompt), `-NoStart` (don't launch at the end). Everything is logged to
+`-NoTask` (no startup task, no admin prompt), `-NoStart` (don't launch at the end), `-SkipTts` (no voice for
+spoken answers; it is only installed with an NVIDIA GPU of 10 GB or more anyway, and a failure there never fails the
+setup). Everything is logged to
 `install.log`.
 
 There is one `LocalFlow` startup task per computer (the task name is shared by all Windows users). If it already runs
@@ -298,7 +306,7 @@ Reproduce with `tests\gen_bench_corpus.py` then `tests\bench_streaming.py`.
 ## Game mode (free the GPU while gaming)
 
 When a process listed in `game_mode.processes` is running (default `VALORANT-Win64-Shipping.exe`), LocalFlow unloads
-the speech model and stops the cleanup llama-server so the VRAM goes back to the game. About 10 s after the game
+the speech model, stops the cleanup llama-server and the spoken-answers voice so the VRAM goes back to the game. About 10 s after the game
 exits (`exit_grace_s`) both are reloaded, and an overlay toast says so. If the GPU is slow to free up, the reload
 retries (5, 10, 20, 40 s) before falling back to the CPU model. Only process names are read; nothing else about other
 processes is inspected.
@@ -318,7 +326,9 @@ Everything lives in `%APPDATA%\LocalFlow\`:
 - `history.db` (SQLite), `localflow.log` (rotating), `llama-server.log`, `crash.log`, `sounds/`.
 
 Key settings: `hotkey` ("ctrl+alt"; any of ctrl/alt/shift/win), `mic.match` and `mic.device` (see
-[Microphone](#microphone)), `audio.keep_open` (always-open stream + 400 ms pre-roll), `stt.model/language/device`,
+[Microphone](#microphone)), `audio.keep_open` (always-open stream + 400 ms pre-roll), `audio.mute_output_while_dictating` (default on: mutes
+the default speakers while you hold the keys and unmutes them on release; devices already muted are left alone; an
+`output_mute.json` marker in this folder makes the next start unmute them after a crash), `stt.model/language/device`,
 `cleanup.enabled/min_words`, `insert.mode` ("paste" or "type"), `insert.restore_clipboard`, `ui.sounds/overlay`,
 `auto_style`, `profiles`, `process_groups`, `styles`, `abbreviations`, `streaming.*`, `dictionary`, `snippets`,
 `history.enabled`. The first start after an upgrade writes new sections into your config.json so they are easy to

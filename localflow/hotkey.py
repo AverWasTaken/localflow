@@ -147,6 +147,9 @@ class HotkeyManager:
         self._needs_mask = False
         self._down: dict[int, float] = {}   # vk -> time pressed (physical keys we know are down)
         self._swallow: set[int] = set()     # vks whose down/up/repeat we swallow
+        # Tab autocomplete (autocomplete.Autocomplete): note_key(vk) on every non-modifier key-down (a counter, no
+        # characters), want_swallow(vk) -> bool for Tab / Backspace while the hotkey is idle and no modifier is held
+        self.key_listener = None
         self._lock = threading.RLock()
         self._hook = None
         self._proc = HOOKPROC(self._hook_proc)       # keep a reference alive
@@ -363,6 +366,22 @@ class HotkeyManager:
             # ---- non-modifier key
             if not down:
                 return False
+            kl = self.key_listener
+            if kl is not None:
+                if st == "idle" and not held and vk in (w.VK_TAB, w.VK_BACK):
+                    try:
+                        take = kl.want_swallow(vk)
+                    except Exception:
+                        log.exception("autocomplete key check failed")
+                        take = False
+                    if take:
+                        if vk == w.VK_TAB:      # Backspace: only this press (holding it keeps deleting)
+                            self._swallow.add(vk)
+                        return True
+                try:
+                    kl.note_key(vk)
+                except Exception:
+                    log.exception("autocomplete key note failed")
             if st == "idle" and self.paste is not None and self._cb_paste is not None \
                     and vk == self.paste[1] and held == self.paste[0]:
                 # paste-last chord: swallow the key (+ its repeats / key-up) and mask the modifiers' release so

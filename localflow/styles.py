@@ -46,8 +46,8 @@ DEFAULT_STYLES: dict[str, dict[str, Any]] = {
                    "Drop apostrophes in common contractions (dont, cant, im, thats, lets, ive). "
                    "Use texting abbreviations ONLY for phrases the speaker actually said: idk, nvm, tbh, rn, omw, ngl, "
                    "imo, btw, omg, brb, idc, ttyl, lmk, fr. Still remove filler sounds (um, uh, er, hmm, \"you know\"). "
-                   "Do not polish the grammar, and do not shorten single words (write \"you\", not \"u\"). "
-                   "Never add slang, emoji or words that were not said. "
+                   "Do not polish the grammar (no agreement fixes), and do not shorten single words (write \"you\", not "
+                   "\"u\"). Never add slang, emoji or words that were not said. "
                    "Self-corrections still apply: after \"wait no\", \"or wait\", \"no wait\", \"sorry\", \"actually\" "
                    "or \"i mean\" fixes a mistake, keep only the corrected version and drop the wrong part, the "
                    "correction words and any leftover \"or\". "
@@ -112,8 +112,9 @@ DEFAULT_STYLES: dict[str, dict[str, Any]] = {
     },
     "code": {
         "description": "Editors and terminals: literal wording, no capitalised first letter, no final period.",
-        "prompt": ("Code/terminal context. Keep the wording literal, do not capitalize the first letter of "
-                   "the text, and put no final period."),
+        "prompt": ("Code/terminal context. Keep the wording literal (rule 3 grammar fixes apply to prose sentences "
+                   "only, never to commands, code or identifiers), do not capitalize the first letter of the text, "
+                   "and put no final period."),
         "lowercase": False,
         "strip_trailing_period": "single",
         "abbreviations": False,
@@ -429,6 +430,8 @@ def get_style(cfg, name: str) -> dict:
         name = name if name in DEFAULT_STYLES else NEUTRAL
     d = dict(d)
     d["name"] = name
+    # examples written by the user (present in the config's style) vs. the built-in ones filled in here
+    d["custom_examples"] = "examples" in d
     if "examples" not in d:
         d["examples"] = copy.deepcopy(DEFAULT_EXAMPLES.get(name, []))
     return d

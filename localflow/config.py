@@ -19,7 +19,8 @@ from .paths import CONFIG_PATH
 log = logging.getLogger(__name__)
 
 # keys whose dict values are user maps: replaced wholesale on update, not merged
-_MAP_KEYS = ("replacements", "snippets", "abbreviations", "process_groups", "model_args", "model_request")
+_MAP_KEYS = ("replacements", "snippets", "abbreviations", "process_groups", "model_args", "model_request",
+             "model_prompt", "model_reasoning")
 
 # LFM3 is a reasoning model whose "thinking off" mode is not reliable: after the answer it often keeps going
 # ("Let me clean this up...", "Wait, ...", "</think>"). Stopping at those markers keeps just the answer.
@@ -44,6 +45,21 @@ DEFAULTS: dict[str, Any] = {
         "timeout_s": 30.0,           # LLM request timeout
         "capture_timeout_ms": 600,   # how long to wait for the app to answer Ctrl+C
         "max_tokens_generate": 768,  # output budget when there is no selection
+        # questions ("how many hours from 9 to 5?", "what does this mean?") are answered in a card under the overlay
+        # pill instead of being typed; a leading "ask" forces it, a leading "write" / "type" forces typing
+        "answer_questions": True,
+        "answer_max_tokens": 256,    # output budget for an answer
+        # read the answer card aloud (Qwen3-TTS 0.6B in its own process, ~2.6 GB of GPU memory while it runs; needs
+        # the optional TTS install: .venv-tts + models/tts). Stops when you start a recording; at most ~30 s.
+        "speak_answers": True,
+        "tts_voice": "Ryan",         # Ryan, Aiden (English); Vivian, Serena, Uncle_Fu, Dylan, Eric, Ono_Anna, Sohee
+        "tts_device": "",            # output device name ("" = Windows default output)
+        "tts_volume": 1.0,           # 0.0 - 1.0
+        # calculations ("convert one foot to inches", "15% tip on 84 dollars", "days until christmas"): the AI writes
+        # a small Python script, LocalFlow runs it in a locked-down Python and the printed result is the answer
+        "run_python": True,
+        "python_timeout_s": 5,       # the script is stopped after this long
+        "calc_max_tokens": 400,      # output budget for the script
         # never send Ctrl+C here (terminals: Ctrl+C = interrupt; editors copy the whole line with no selection):
         # these apps are generate-only (the answer is inserted at the cursor)
         "no_capture_apps": ["windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
@@ -55,6 +71,33 @@ DEFAULTS: dict[str, Any] = {
     },
     # Re-insert the last dictated / command text at the cursor (tray: "Paste last transcript")
     "paste_last": {"enabled": True, "hotkey": "alt+shift+z"},
+    # Tab autocomplete: after a short typing pause in a multi-line text box (chat, email, notes), the AI model guesses
+    # the next few words and shows them in gray right of the cursor. Tab types them, Backspace hides the guess for the
+    # rest of that sentence, any other key just hides it. Never in password fields, single-line boxes (search,
+    # address bar, forms), private browser windows or the apps in exclude_apps (exe names, * wildcards allowed).
+    "autocomplete": {
+        "enabled": True,
+        "debounce_ms": 350,          # typing pause before a guess
+        "min_chars": 3,              # text needed before the cursor
+        "max_chars": 80,             # longest guess
+        "max_tokens": 24,
+        "temperature": 0.2,
+        "before_chars": 1500,        # text box content before the cursor sent to the model
+        "after_chars": 300,
+        "context_chars": 2000,       # other text visible in the window sent to the model (0 = none)
+        "ttl_s": 8.0,                # the guess disappears after this many seconds
+        "min_visible_ms": 250,       # Tab / Backspace only act on a guess that has been visible this long
+        "timeout_s": 3.0,
+        "debug_log": False,          # log every guess attempt's outcome (reasons only, never text), not once a minute
+        "exclude_apps": ["windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+                         "openconsole.exe", "wezterm-gui.exe", "alacritty.exe", "mintty.exe", "kitty.exe",
+                         "hyper.exe", "tabby.exe", "warp.exe", "putty.exe", "code.exe", "code - insiders.exe",
+                         "cursor.exe", "windsurf.exe", "zed.exe", "sublime_text.exe", "idea64.exe",
+                         "pycharm64.exe", "webstorm64.exe", "clion64.exe", "rider64.exe", "goland64.exe",
+                         "phpstorm64.exe", "rubymine64.exe", "datagrip64.exe", "studio64.exe", "fleet.exe",
+                         "devenv.exe", "excel.exe", "1password.exe", "keepass*.exe", "keepassxc.exe",
+                         "bitwarden.exe", "mstsc.exe", "vmconnect.exe"],
+    },
     "mic": {
         # Both empty = follow the Windows default recording device (Sound settings), switching live when it changes.
         "match": "",         # optional: case-insensitive substring of an input device name to prefer over the default
@@ -66,6 +109,7 @@ DEFAULTS: dict[str, Any] = {
         "min_duration_s": 0.3,   # shorter recordings are discarded
         "silence_rms": 0.006,    # peak-window RMS below this == silence (pre-STT gate)
         "max_duration_s": 300,
+        "mute_output_while_dictating": True,   # mute the default speakers while recording a dictation / command
     },
     "stt": {
         "model": "large-v3-turbo",   # or small.en / base.en / a local path
@@ -87,16 +131,33 @@ DEFAULTS: dict[str, Any] = {
         "ctx": 8192,
         "timeout_s": 5.0,
         "max_len_ratio": 1.6,        # sanity guard on output/input length
+        # neutral / casual / code: put back spoken words the model swapped for different ones on its own
+        # ("unhelped technicians" -> "helpers"); swaps the user's settings ask for are kept (localflow/keepwords.py)
+        "keep_words": True,
         # Per-model extras, keyed by the model's file name (tray / Settings switch models live):
-        # model_args: extra llama-server command-line args; model_request: extra fields for each chat request.
+        # model_args: extra llama-server command-line args; model_request: extra fields for each chat request;
+        # model_prompt: "full" (default: built-in few-shot examples) or "compact" (system prompt + the request only,
+        # for models fine-tuned on cleanup); model_reasoning: {"enabled": bool, "budget": thinking tokens} lets the
+        # model think before answering (llama-server --reasoning-budget; slower). New entries for shipped models
+        # reach existing configs through the model_defaults_v1 migration.
         "model_args": {},
-        "model_request": {"LFM3-1.7B-Q8_0.gguf": {"stop": LFM3_STOPS}},
+        "model_request": {"LFM3-1.7B-Q8_0.gguf": {"stop": LFM3_STOPS},
+                          "LFM3-1.7B-LocalFlow-Q8_0.gguf": {"stop": ["<think>", "</think>"]}},
+        "model_prompt": {"LFM3-1.7B-LocalFlow-Q8_0.gguf": "compact"},
+        "model_reasoning": {},
     },
     "insert": {
         "mode": "paste",             # "paste" (clipboard + Ctrl+V) or "type" (SendInput unicode)
         "restore_clipboard": True,
         "restore_delay_ms": 300,
         "trailing_space": False,
+        # no text box focused (desktop, taskbar, a web page with nothing clicked, a button / list item): the dictation
+        # is copied to the clipboard (kept in Win+V history, never cloud-synced) and a toast says so. In paste mode
+        # Ctrl+V is still sent unless the desktop / taskbar is focused. Unclear cases paste as before (fieldprobe.py).
+        "copy_when_no_field": True,
+        # per-app override of that check, exe name -> "field" (always paste as before) | "none" (always just copy,
+        # no keystroke), e.g. {"somegame.exe": "field"}
+        "no_field_override": {},
     },
     "ui": {
         "overlay": True,
@@ -226,8 +287,78 @@ def _migrate_casual_code(data: dict) -> bool:
     return False
 
 
+# the casual and code prompts shipped before the light grammar rule (SYSTEM_PROMPT rule 3 agreement / doubled word /
+# a-an fixes): casual opts out of agreement fixes, code limits the fixes to prose
+CASUAL_PROMPT_V2 = CASUAL_PROMPT_V1.replace(
+    "file path and code name in backticks, keeping their exact "
+    "spelling; never backtick",
+    "file path, code name and any code the speaker reads out loud in "
+    "backticks, keeping their exact spelling and the spoken words; for code read out loud add only the "
+    "symbols it needs (parentheses, quotes, dots, =), e.g. print goodbye -> `print(\"goodbye\")`. "
+    "Text a program prints or outputs also goes in backticks (it would output `goodbye`). Normal uses "
+    "of those words are not code (print the report, log in, i like python); never backtick").replace(
+    "Never add slang, emoji or words that were not said. ",
+    "Never add slang, emoji or words that were not said. "
+    "Self-corrections still apply: after \"wait no\", \"or wait\", \"no wait\", \"sorry\", \"actually\" "
+    "or \"i mean\" fixes a mistake, keep only the corrected version and drop the wrong part, the "
+    "correction words and any leftover \"or\". ")
+CODE_PROMPT_V1 = ("Code/terminal context. Keep the wording literal, do not capitalize the first letter of "
+                  "the text, and put no final period.")
+
+
+def _migrate_grammar(data: dict) -> bool:
+    """An unedited casual or code prompt gets the current one (light grammar rule). A casual prompt that is the old
+    default plus text the user added at the end keeps that added text after the new default. Other edits stay."""
+    st = data.get("styles")
+    if not isinstance(st, dict):
+        return False
+    changed = False
+    for name, old in (("casual", CASUAL_PROMPT_V2), ("code", CODE_PROMPT_V1)):
+        sd = st.get(name)
+        p = sd.get("prompt") if isinstance(sd, dict) else None
+        if not isinstance(p, str):
+            continue
+        if p == old:
+            sd["prompt"] = _styles.DEFAULT_STYLES[name]["prompt"]
+            changed = True
+        elif name == "casual" and p.startswith(old + " "):
+            sd["prompt"] = _styles.DEFAULT_STYLES[name]["prompt"] + p[len(old):]
+            changed = True
+    return changed
+
+
+MODEL_MAP_KEYS = ("model_prompt", "model_request", "model_reasoning", "model_args")
+
+
+def _migrate_model_defaults(data: dict) -> bool:
+    """Per-model maps are saved whole into config.json, so default entries for newly shipped models never reach an
+    existing config. Add each missing default entry (file names compared case-insensitively); entries already in the
+    config, edited or not, are never touched. A map that is not an object is left alone."""
+    cleanup = data.get("cleanup")
+    if not isinstance(cleanup, dict):
+        return False
+    changed = False
+    for key in MODEL_MAP_KEYS:
+        default = DEFAULTS["cleanup"].get(key) or {}
+        if key not in cleanup:
+            cleanup[key] = copy.deepcopy(default)
+            changed = changed or bool(default)
+            continue
+        table = cleanup[key]
+        if not isinstance(table, dict):
+            log.warning("config: cleanup.%s is not an object - left unchanged", key)
+            continue
+        have = {str(k).lower() for k in table}
+        for fname, val in default.items():
+            if fname.lower() not in have:
+                table[fname] = copy.deepcopy(val)
+                changed = True
+    return changed
+
+
 MIGRATIONS = {"email_style_v1": _migrate_email_style, "casual_format_v1": _migrate_casual_format,
-              "casual_format_v2": _migrate_casual_code}
+              "casual_format_v2": _migrate_casual_code, "model_defaults_v1": _migrate_model_defaults,
+              "grammar_v1": _migrate_grammar}
 
 
 def apply_migrations(data: dict) -> bool:
@@ -246,7 +377,7 @@ def apply_migrations(data: dict) -> bool:
 
 # top-level sections introduced after v1: written into an existing config.json the first time
 PERSISTED_KEYS = {"auto_style", "profiles", "process_groups", "styles", "abbreviations", "streaming", "game_mode",
-                  "command_mode", "paste_last", "meetings", "transcripts", "assistant"}
+                  "command_mode", "paste_last", "meetings", "transcripts", "assistant", "autocomplete"}
 
 
 def deep_merge(base: dict, over: dict) -> dict:

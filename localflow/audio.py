@@ -334,6 +334,13 @@ class AudioInput:
             return self._rec[since:], len(self._rec)
 
     # --- recording control
+    def drop_preroll(self) -> None:
+        """Forget the buffered pre-roll, so the next begin() starts with fresh audio only (used when a spoken
+        answer was just playing: the pre-roll would hold the voice)."""
+        with self._lock:
+            self._preroll.clear()
+            self._preroll_samples = 0
+
     def begin(self) -> None:
         if not self.keep_open and self._stream is None:
             # no watcher in this mode, so check for a changed default device here before opening

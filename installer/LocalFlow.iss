@@ -4,6 +4,7 @@
 ; Extra setup switches (besides the standard /SILENT, /VERYSILENT, /DIR=...):
 ;   /SKIPMODEL  don't download the AI cleanup model
 ;   /NOTASK     don't register the "LocalFlow" startup task (no admin prompt)
+;   /SKIPTTS    don't install the voice that reads command-mode answers aloud (NVIDIA GPUs only anyway)
 ; Setup exit code 10 = files were copied but install.ps1 failed (see install.log in the install folder).
 ; Keep this file ASCII only.
 
@@ -51,10 +52,11 @@ UsePreviousTasks=yes
 RedirectionGuard=no
 
 [Messages]
-WelcomeLabel2=This will install [name/ver] on your computer.%n%nAfter copying its files, setup downloads Python, the Python packages, llama.cpp and the AI models (about 7 GB in total, or about 2.5 GB without the AI cleanup model). Keep the computer online until it finishes. A PowerShell window shows the progress.%n%nWindows asks for admin permission once, to add the startup task that lets LocalFlow type into apps running as administrator.
+WelcomeLabel2=This will install [name/ver] on your computer.%n%nAfter copying its files, setup downloads Python, the Python packages, llama.cpp and the AI models (about 7 GB in total, or about 2.5 GB without the AI cleanup model; with an NVIDIA GPU about 10 GB more for the voice that reads answers aloud). Keep the computer online until it finishes. A PowerShell window shows the progress.%n%nWindows asks for admin permission once, to add the startup task that lets LocalFlow type into apps running as administrator.
 
 [Tasks]
 Name: "downloadmodel"; Description: "Download the AI cleanup model (about 4.5 GB, recommended with an NVIDIA GPU)"; GroupDescription: "Optional downloads:"
+Name: "speakanswers"; Description: "Download the voice that reads command-mode answers aloud (about 10 GB, NVIDIA GPU only)"; GroupDescription: "Optional downloads:"
 
 [InstallDelete]
 ; no stale modules left behind by an older version
@@ -71,6 +73,7 @@ Source: "..\scripts\launch.pyw"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\requirements-tts.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 
@@ -84,6 +87,7 @@ Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: """{app}\scripts\launch
 [UninstallDelete]
 ; (before any of this, CurUninstallStepChanged runs uninstall.ps1 to stop this copy and remove its startup task)
 Type: filesandordirs; Name: "{app}\.venv"
+Type: filesandordirs; Name: "{app}\.venv-tts"
 Type: filesandordirs; Name: "{app}\bin"
 Type: filesandordirs; Name: "{app}\models"
 Type: filesandordirs; Name: "{app}\python"
@@ -192,6 +196,8 @@ begin
     Params := Params + ' -SkipModel';
   if HasSwitch('/NOTASK') then
     Params := Params + ' -NoTask';
+  if HasSwitch('/SKIPTTS') or not WizardIsTaskSelected('speakanswers') then
+    Params := Params + ' -SkipTts';
   if WizardSilent then
     Show := SW_HIDE
   else
