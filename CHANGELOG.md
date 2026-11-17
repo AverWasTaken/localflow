@@ -2,6 +2,26 @@
 
 All notable changes to LocalFlow are listed here. Versions follow [Semantic Versioning](https://semver.org).
 
+## [1.2.0] - 2026-11-16
+
+### Added
+
+- Custom-trained cleanup model (LFM3-1.7B fine-tuned for LocalFlow) is now the default. The app downloads it
+  (about 1.8 GB, checked against a pinned SHA-256) on first start if it is missing, with progress in the tray, and
+  resumes an interrupted download. `install.ps1` downloads it during setup; Qwen3.5-4B is optional (`-WithQwen`).
+- The tray and Settings model pickers list the downloadable model before it is downloaded.
+- Command mode answers questions in an overlay card, works out time spans and arithmetic exactly, and runs
+  calculations as checked Python scripts.
+- Tab autocomplete with gray ghost text next to the caret.
+- Optional spoken answers (Qwen3-TTS 0.6B, NVIDIA GPU only, `scripts/install-tts.ps1`).
+- Speakers are muted while dictating (`audio.mute_output_while_dictating`).
+- keep_words guard that undoes word swaps the cleanup model made on its own.
+
+### Changed
+
+- New icon set and reworked window theme.
+- LocalFlow checks that a text box is focused before it inserts a dictation.
+
 ## [1.1.1] - 2026-11-08
 
 ### Fixed
@@ -44,6 +64,7 @@ All notable changes to LocalFlow are listed here. Versions follow [Semantic Vers
 - Initial public release: push-to-talk dictation with faster-whisper and local LLM cleanup, per-app writing styles,
   streaming transcription, dictionary and snippets.
 
+[1.2.0]: https://github.com/AverWasTaken/localflow/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/AverWasTaken/localflow/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/AverWasTaken/localflow/releases/tag/v1.1.0
 [1.0.0]: https://github.com/AverWasTaken/localflow/commit/07c075e
