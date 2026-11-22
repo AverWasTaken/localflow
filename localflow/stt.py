@@ -19,6 +19,9 @@ log = logging.getLogger(__name__)
 os.environ.setdefault("CUDA_CACHE_MAXSIZE", str(4 * 1024 ** 3))
 os.environ.setdefault("CUDA_CACHE_DISABLE", "0")
 
+# A single 0.0 leaves the compression ratio check with no retry. Clean decodes still stop at 0.0.
+_TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+
 MODEL_REPOS = {
     "large-v3-turbo": "h2oai/faster-whisper-large-v3-turbo",
     "turbo": "h2oai/faster-whisper-large-v3-turbo",
@@ -231,7 +234,7 @@ class Transcriber:
         kwargs = dict(
             beam_size=int(st.get("beam_size", 1)), language=lang, vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=350, speech_pad_ms=200, threshold=0.45),
-            condition_on_previous_text=False, temperature=0.0,
+            condition_on_previous_text=False, temperature=_TEMPERATURES,
             no_speech_threshold=float(st.get("no_speech_threshold", 0.6)),
             log_prob_threshold=float(st.get("log_prob_threshold", -1.0)),
             compression_ratio_threshold=2.4, without_timestamps=True,
@@ -250,12 +253,16 @@ class Transcriber:
             res.dropped = "no speech (VAD)"
             return res
         res.segments = [(s.text, s.avg_logprob, s.no_speech_prob) for s in segs]
-        text = " ".join(s.text.strip() for s in segs).strip()
+        parts = [s.text.strip() for s in segs]
+        raw_text = " ".join(parts).strip()
+        text = raw_text
+        if len(parts) > 1:
+            text = " ".join(self._collapse_repeat(part, whole_transcript=False) for part in parts).strip()
         res.avg_logprob = float(np.mean([s.avg_logprob for s in segs]))
         max_nsp = max(s.no_speech_prob for s in segs)
         text = self._collapse_repeat(text)
         res.text = text
-        reason = self._hallucination_reason(text, res, max_nsp)
+        reason = self._hallucination_reason(text, res, max_nsp, raw_text=raw_text)
         if reason:
             res.dropped = reason
             res.text = ""
@@ -266,8 +273,8 @@ class Transcriber:
         """Timestamped transcription of one chunk (<= ~30 s) of 16 kHz mono float32 for file / meeting jobs.
 
         Returns [(start_s, end_s, text)] with ``offset_s`` added. Same lock as dictation, so a running chunk
-        delays a dictation by at most one chunk. No dictation-only filters (repeat collapse, short-utterance
-        rules); VAD drops silence and per-segment checks remove the classic silence hallucinations.
+        delays a dictation by at most one chunk. VAD drops silence and per-segment checks filter silence
+        hallucinations and collapse longer decoder loops while keeping short, confident repetitions.
         Raises ModelUnloaded while the model is unloaded (game mode) so the caller can wait and retry."""
         with self._lock:
             if self.model is None:
@@ -283,7 +290,7 @@ class Transcriber:
             segs_iter, info = self.model.transcribe(
                 audio, beam_size=int(st.get("beam_size", 1)), language=lang, vad_filter=True,
                 vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200, threshold=0.45),
-                condition_on_previous_text=False, temperature=0.0,
+                condition_on_previous_text=False, temperature=_TEMPERATURES,
                 no_speech_threshold=float(st.get("no_speech_threshold", 0.6)),
                 log_prob_threshold=float(st.get("log_prob_threshold", -1.0)),
                 compression_ratio_threshold=2.4, without_timestamps=False,
@@ -303,37 +310,85 @@ class Transcriber:
                 words = n.split()
                 if len(set(words)) <= 2 and (len(words) >= 12 or (unsure and len(words) >= 6)):   # decoder loop
                     continue
+                text = self._collapse_repeat(text, whole_transcript=False)
                 out.append((round(float(s.start) + offset_s, 3), round(float(s.end) + offset_s, 3), text))
             return out
 
     @staticmethod
-    def _collapse_repeat(text: str) -> str:
-        """'A. A.' / 'A A A' (whole transcript is one phrase repeated) -> 'A'."""
+    def _collapse_repeat(text: str, *, whole_transcript: bool = True) -> str:
+        """Keep the first copy of a decoder loop, including loops within longer text."""
         words = text.split()
-        n = len(words)
-        for k in range(2, 5):
-            if n % k == 0 and n >= 2:
-                size = n // k
-                chunk = [w.lower().strip(".,!?") for w in words[:size]]
-                if all([w.lower().strip(".,!?") for w in words[i * size:(i + 1) * size]] == chunk for i in range(k)):
-                    return " ".join(words[:size])
-        return text
+        original_count = len(words)
+        while True:
+            normalized = [word.lower().strip(".,!?;:\"'()[]{}-…–—") for word in words]
+            normalized = [word if any(c.isalnum() for c in word) else "" for word in normalized]
+            n = len(words)
+            if whole_transcript and all(normalized):
+                # Two copies of a longer phrase are enough when they make up the entire dictation.
+                for size in range(1, n // 2 + 1):
+                    copies, remainder = divmod(n, size)
+                    min_copies = (4, 3)[size - 1] if size <= 2 else 2
+                    if not remainder and copies >= min_copies and normalized == normalized[:size] * copies:
+                        words = words[:size]
+                        break
+                if len(words) < n:
+                    continue
+
+            kept = []
+            start = 0
+            while start < n:
+                for size in range(1, min(24, (n - start) // 3) + 1):
+                    phrase = normalized[start:start + size]
+                    copies = 4 if size == 1 else 3
+                    end = start + size * copies
+                    if not all(phrase) or normalized[start + size:end] != phrase * (copies - 1):
+                        continue
+                    while normalized[end:end + size] == phrase:
+                        end += size
+
+                    # Keep phrases such as "on and on and on" and short counts in timestamped speech.
+                    if size == 2 and phrase[1] == "and" and end < n and normalized[end] == phrase[0]:
+                        end += 1
+                        kept.extend(words[start:end])
+                    elif not whole_transcript and size == 2 and start == 0 and end == n == 6:
+                        kept.extend(words[start:end])
+                    else:
+                        kept.extend(words[start:start + size])
+                        if size > 1 and 0 < n - end < size and normalized[end:] == phrase[:n - end]:
+                            end = n
+                    start = end
+                    break
+                else:
+                    kept.append(words[start])
+                    start += 1
+            if len(kept) == n:
+                return text if n == original_count else " ".join(kept)
+            words = kept
 
     @staticmethod
-    def _hallucination_reason(text: str, res: STTResult, max_nsp: float) -> str:
+    def _hallucination_reason(text: str, res: STTResult, max_nsp: float, *, raw_text: str) -> str:
         n = _norm(text)
         if not n:
             return "empty"
         low = text.lower()
         if any(s in low for s in _ALWAYS_DROP_SUBSTR) and res.speech_s < 6:
             return f"hallucination substring ({text[:40]!r})"
-        if n in _HALLUCINATIONS or low.strip() in _HALLUCINATIONS:
+        known_hallucination = n in _HALLUCINATIONS or low.strip() in _HALLUCINATIONS
+        unsure = max_nsp > 0.2 or res.avg_logprob < -0.7
+        if known_hallucination:
             # a genuine one-word "thank you" is plausible; only drop when the audio looks like noise
-            if res.speech_s < 1.5 and (max_nsp > 0.2 or res.avg_logprob < -0.7):
+            if res.speech_s < 1.5 and unsure:
                 return f"hallucination blacklist ({text[:40]!r})"
             if res.speech_s < 0.7:
                 return f"hallucination blacklist/very short ({text[:40]!r})"
         words = n.split()
         if len(words) >= 6 and len(set(words)) <= 2:
             return "repetition loop"
+        if raw_text != text:
+            # Collapse can hide the length of a noise loop even when Whisper is confident.
+            raw_words = _norm(raw_text).split()
+            if len(raw_words) >= 12 and len(set(raw_words)) == 1:
+                return "repetition loop"
+            if (unsure or known_hallucination) and len(raw_words) >= 6 and len(set(raw_words)) <= 2:
+                return "repetition loop"
         return ""
