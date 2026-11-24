@@ -215,6 +215,10 @@ DEFAULTS: dict[str, Any] = {
     # AI notes on transcripts (summary / bullets / key points / action items / custom). wait_ready_s: longest wait
     # for the AI model to come up, for notes and for transcript cleanup (then basic cleanup is used).
     "assistant": {"max_tokens": 1024, "note_tokens": 600, "temperature": 0.3, "wait_ready_s": 900},
+    # In-app updates from GitHub releases. check_on_launch: look for a new release ~15 s after start (and once a day
+    # while running). skipped_version: "X.Y.Z" the user chose to skip; launch checks don't offer it again (a manual
+    # "Check for updates" still does).
+    "updates": {"check_on_launch": True, "skipped_version": ""},
 }
 
 
@@ -377,7 +381,8 @@ def apply_migrations(data: dict) -> bool:
 
 # top-level sections introduced after v1: written into an existing config.json the first time
 PERSISTED_KEYS = {"auto_style", "profiles", "process_groups", "styles", "abbreviations", "streaming", "game_mode",
-                  "command_mode", "paste_last", "meetings", "transcripts", "assistant", "autocomplete"}
+                  "command_mode", "paste_last", "meetings", "transcripts", "assistant", "autocomplete",
+                  "updates"}
 
 
 def deep_merge(base: dict, over: dict) -> dict:

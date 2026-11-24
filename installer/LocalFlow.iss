@@ -5,6 +5,11 @@
 ;   /SKIPMODEL  don't download the AI cleanup model
 ;   /NOTASK     don't register the "LocalFlow" startup task (no admin prompt)
 ;   /SKIPTTS    don't install the voice that reads command-mode answers aloud (NVIDIA GPUs only anyway)
+;   /RELAUNCH   in-app update mode, used by LocalFlow's updater (localflow\updater.py) together with /SILENT:
+;               gives the running copy up to about 30 seconds to quit on its own, leaves the startup task alone
+;               while stopping it (setup was started by LocalFlow, so it may run inside that task), and starts
+;               LocalFlow again after a successful install. The updater always runs the new version's setup,
+;               so older setups never need this switch.
 ; Setup exit code 10 = files were copied but install.ps1 failed (see install.log in the install folder).
 ; Keep this file ASCII only.
 
@@ -162,6 +167,25 @@ begin
   end;
 end;
 
+{ /RELAUNCH: the in-app updater starts setup and then quits LocalFlow. Wait (up to about 30 seconds) until no
+  process of this copy is left, so stop.ps1 below has nothing to kill in the middle of a clean shutdown. }
+procedure WaitForAppToQuit(const Dir: String);
+var
+  Params: String;
+  RC, I: Integer;
+begin
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\stop.ps1') + '" -Root "' + Dir + '" -CheckOnly';
+  for I := 1 to 15 do
+  begin
+    if not Exec(PowerShellExe, Params, '', SW_HIDE, ewWaitUntilTerminated, RC) then
+      Exit;
+    if RC = 0 then
+      Exit;
+    Log('LocalFlow is still running, waiting for it to quit');
+    Sleep(1000);
+  end;
+end;
+
 { Upgrade / reinstall: stop the copy running from this folder (and only that copy) before files are replaced. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -177,6 +201,11 @@ begin
   ExtractTemporaryFile('stop.ps1');
   ExtractTemporaryFile('lfcommon.ps1');
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\stop.ps1') + '" -Root "' + Dir + '"';
+  if HasSwitch('/RELAUNCH') then
+  begin
+    WaitForAppToQuit(Dir);
+    Params := Params + ' -KeepTask';
+  end;
   if not Exec(PowerShellExe, Params, '', SW_HIDE, ewWaitUntilTerminated, RC) then
     RC := -1;
   if RC <> 0 then
@@ -221,10 +250,26 @@ begin
   until not Again;
 end;
 
+{ /RELAUNCH: start the updated LocalFlow. It is started directly rather than through scripts\launch.pyw: when
+  setup runs inside the startup task (the old copy ran from it), Task Scheduler still counts that task as running
+  and would ignore launch.pyw's "schtasks /Run" (MultipleInstances IgnoreNew). Started directly, LocalFlow gets
+  setup's rights, which are the old copy's rights. The [Run] entry is skipifsilent, so this never starts it twice. }
+procedure RelaunchApp;
+var
+  RC: Integer;
+begin
+  Log('Starting LocalFlow (/RELAUNCH)');
+  if not Exec(ExpandConstant('{app}\.venv\Scripts\pythonw.exe'), '-m localflow', ExpandConstant('{app}'),
+              SW_SHOWNORMAL, ewNoWait, RC) then
+    Log('Could not start LocalFlow: ' + SysErrorMessage(RC));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
     RunInstallScript;
+  if (CurStep = ssDone) and HasSwitch('/RELAUNCH') and not SetupFailed then
+    RelaunchApp;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);

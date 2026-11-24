@@ -102,6 +102,10 @@ It installs into `%LOCALAPPDATA%\Programs\LocalFlow` and adds LocalFlow to the S
 halfway (no internet, for example), the window shows the error and the full log is in `install.log` in that folder.
 Run the setup again and it continues where it stopped. Running a newer setup over an old one upgrades it.
 
+LocalFlow checks for new releases by itself and offers to update ("Update available"). Click **Download and
+install**: it downloads the new setup, closes, installs the update and starts again. You can also check from the tray
+(**Check for updates...**) or Settings > About.
+
 The first launch on a new GPU can take about 30 seconds while CUDA compiles its kernels (cached afterwards).
 
 > [!NOTE]

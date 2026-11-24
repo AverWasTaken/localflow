@@ -71,7 +71,18 @@ Other tests in `tests/` need more setup and some of them affect your desktop:
 5. Never commit dictation text, history databases, logs or model files.
 6. Open the pull request and fill in the template.
 
-Releases are built by GitHub Actions when the maintainer pushes a `v<version>` tag (`.github/workflows/release.yml`).
+## Releasing
+
+1. Set `__version__` in `localflow/__init__.py` to the new version (for example `1.3.0`) and add a `CHANGELOG.md`
+   entry for it.
+2. Commit, then push a matching tag: `git tag v1.3.0` and `git push origin v1.3.0`.
+3. GitHub Actions (`.github/workflows/release.yml`) checks that the tag matches `__version__`, builds
+   `LocalFlow-Setup-1.3.0.exe` and attaches it to the GitHub release (it creates the release if there is none).
+4. Installed copies find the new release by themselves (at start and once a day) and offer to update. They only offer
+   a published release (not draft or prerelease) that already has its `LocalFlow-Setup-<version>.exe` attached.
+
+The AI cleanup model is downloaded from the release named by `MODEL_RELEASE_TAG` in `localflow/modeldl.py` (and
+`$ModelTag` in `install.ps1`). It stays on the release it was uploaded to; a new release doesn't need to carry it.
 
 ## License
 

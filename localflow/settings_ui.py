@@ -1049,7 +1049,15 @@ class SettingsWindow(QWidget):
     def _build_about(self) -> QWidget:
         sa, lay = _page("About")
         c = Card("LocalFlow")
-        v = QLabel(f"Version {__version__}")
+        v = QWidget()
+        vl = QHBoxLayout(v)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(12)
+        vl.addWidget(QLabel(f"Version {__version__}"))
+        if getattr(self.app, "check_for_updates", None) is not None:
+            ub = _btn("Check for updates", "mini")
+            ub.clicked.connect(lambda: self.app.check_for_updates())
+            vl.addWidget(ub)
         c.add_row("Version", "Fully local push-to-talk dictation. Nothing leaves this PC.", v)
         for title, path in (("Config file", CONFIG_PATH), ("Log file", LOG_PATH)):
             box = QWidget()

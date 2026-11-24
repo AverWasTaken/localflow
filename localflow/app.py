@@ -158,6 +158,7 @@ class LocalFlowApp:
         self._ui_shown = -1
         self.settings_win = None
         self.history_win = None
+        self.updates = None            # update_ui.UpdateController, made in run() (needs the tray)
         self.tray: Optional[QSystemTrayIcon] = None
         self._status = "Starting..."
         self._ready = False
@@ -1309,6 +1310,8 @@ class LocalFlowApp:
         self.model_menu = menu.addMenu("Cleanup model")
         self.model_menu.aboutToShow.connect(self._fill_model_menu)
         menu.addSeparator()
+        a = menu.addAction("Check for updates...")
+        a.triggered.connect(self.check_for_updates)
         a = menu.addAction("Open log")
         a.triggered.connect(lambda: os.startfile(str(LOG_PATH)))
         a = menu.addAction("Quit LocalFlow")
@@ -1450,6 +1453,19 @@ class LocalFlowApp:
         self.settings_win.raise_()
         self.settings_win.activateWindow()
 
+    def check_for_updates(self) -> None:
+        """Tray / About page: look for a new release now and always report the result."""
+        if self.updates is not None:
+            self.updates.check(manual=True)
+
+    def update_blocker(self) -> str:
+        """What an update install must wait for ("" = nothing): quitting would cut it off."""
+        if self.meeting_recording:
+            return "the meeting recording"
+        if self._recording or self.gate.busy():
+            return "the current dictation"
+        return ""
+
     def show_history(self) -> None:
         """History now lives on the Home page of the LocalFlow window."""
         self.show_settings("home")
@@ -1510,6 +1526,12 @@ class LocalFlowApp:
         if self.transcripts is not None:    # off the UI thread: may convert leftover PCM recordings to FLAC
             threading.Thread(target=self._recover_transcripts, name="transcripts-recover", daemon=True).start()
         self.watcher.start()
+        try:
+            from .update_ui import UpdateController
+            self.updates = UpdateController(self)
+            self.updates.start()
+        except Exception:
+            log.exception("update checks unavailable")
         log.info("LocalFlow %s started (hotkey=%s)", __version__, self.cfg.get("hotkey"))
         return self.qapp.exec()
 

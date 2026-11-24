@@ -2,6 +2,24 @@
 
 All notable changes to LocalFlow are listed here. Versions follow [Semantic Versioning](https://semver.org).
 
+## [1.3.0] - 2026-11-24
+
+### Added
+
+- In-app updates. About 15 seconds after it starts (and once a day while it runs), LocalFlow checks GitHub for a
+  newer release. If one is out, it shows "Update available" with the release notes and three choices: Download and
+  install, Later, Skip this version. Download and install fetches the new setup program (size and SHA-256 checked),
+  closes LocalFlow, installs the update in the background and starts LocalFlow again. If a dictation or meeting
+  recording is running, the install waits until it ends. Check by hand from the tray ("Check for updates...") or
+  from Settings > About. Turn off the automatic check with `updates.check_on_launch` in the config file. A copy run
+  from source opens the release page instead of installing.
+- Setup switch `/RELAUNCH`, used by the in-app updater: waits for LocalFlow to quit and starts it again after
+  installing.
+
+### Fixed
+
+- Whisper decoding is retried when it gets stuck, and repetition loops in the transcript are collapsed.
+
 ## [1.2.0] - 2026-11-16
 
 ### Added

@@ -4,8 +4,12 @@
 # that task belongs to this copy, so Task Scheduler does not restart the app. Asks for admin only when needed:
 # the startup task runs LocalFlow elevated, and without admin an elevated process's program path (and sometimes
 # the task itself) can't be read.
+# -CheckOnly: stop nothing, never ask for admin; exit 0 when no process of this copy is visible, else 2.
+# -KeepTask: leave the startup task alone (don't end it, don't count it as running). The in-app updater's setup
+#   (/RELAUNCH) uses this: it was started by LocalFlow, so when LocalFlow ran from the startup task, setup runs
+#   inside that task too, and ending the task could end setup.
 # Exit codes: 0 nothing of this copy is running any more, 2 something is still running or can't be checked.
-param([string]$Root = (Split-Path -Parent $PSScriptRoot), [switch]$NoElevate)
+param([string]$Root = (Split-Path -Parent $PSScriptRoot), [switch]$NoElevate, [switch]$CheckOnly, [switch]$KeepTask)
 
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'lfcommon.ps1')
@@ -44,6 +48,7 @@ function Get-OurProcesses {
 # 'running' / 'idle' = the task belongs to this copy; 'other' = no task, or it runs another copy;
 # 'unknown' = the task (or its state) can't be read
 function Get-OurTaskState {
+    if ($KeepTask) { return 'other' }
     $t = Get-LFTask
     if ($t.Exists -eq $false) { return 'other' }
     if (-not $t.Exists -or -not $t.Exe) { return 'unknown' }
@@ -75,6 +80,11 @@ function Get-Blockers {
     return ,$b
 }
 
+if ($CheckOnly) {
+    if (@(Get-OurProcesses).Count -gt 0) { exit 2 }
+    exit 0
+}
+
 Stop-Ours
 $blockers = Get-Blockers
 
@@ -84,6 +94,7 @@ if ($blockers.Count -gt 0 -and -not $NoElevate -and -not (Test-LFAdmin)) {
     try {
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"",
                      '-Root', "`"$Root`"", '-NoElevate')
+        if ($KeepTask) { $argList += '-KeepTask' }
         $p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList $argList -Wait -PassThru
         $childExit = $p.ExitCode
     } catch { Write-Host "Elevation was declined: $($_.Exception.Message)" }

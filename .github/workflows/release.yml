@@ -47,6 +47,9 @@ jobs:
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1 -Version $env:VERSION
 
+      # The in-app updater (localflow/updater.py) depends on this: it reads /releases/latest, which skips draft
+      # and prerelease releases, and only offers a release that has an asset named exactly
+      # LocalFlow-Setup-<version>.exe. Keep that name, and keep releases published (not draft or prerelease).
       - name: Upload to the GitHub Release
         shell: pwsh
         run: |
