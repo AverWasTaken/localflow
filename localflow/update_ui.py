@@ -208,6 +208,7 @@ class UpdateController(QObject):
             return
         self.info = info
         if manual:
+            self._pending = None        # this offer replaces one a launch check is holding back
             self._show("offer", activate=True)
         else:
             self._pending = info
@@ -219,6 +220,10 @@ class UpdateController(QObject):
     def _offer_when_quiet(self) -> None:
         """Launch check: don't pop a window up mid-dictation, mid-recording or over a game."""
         if self._pending is None or self.busy:
+            return
+        skipped = str(self.cfg.get("updates.skipped_version", "") or "")
+        if not self.cfg.get("updates.check_on_launch", True) or not updater.should_offer(self._pending, skipped):
+            self._pending = None        # turned off or skipped while it waited
             return
         if not self._quiet():
             QTimer.singleShot(DEFER_MS, self._offer_when_quiet)
@@ -322,6 +327,8 @@ class UpdateController(QObject):
             self.dialog.set_progress(done, total)
 
     def _on_downloaded(self, path: str, err: str) -> None:
+        if self._cancel is not None and self._cancel.is_set():
+            err = "cancelled"           # cancelled after the download had already finished: don't install
         if err == "cancelled":
             self._state = "idle"
             log.info("update: download cancelled")
@@ -344,6 +351,11 @@ class UpdateController(QObject):
             self._wait_timer.stop()
             return
         why = self.app.update_blocker()
+        if not why:
+            self.app.installing_update = True  # no new dictation / meeting from here on...
+            why = self.app.update_blocker()    # ...then check again, so nothing starts between check and quit
+            if why:
+                self.app.installing_update = False
         if why:
             if not self._wait_timer.isActive():
                 self._wait_timer.start()
@@ -356,6 +368,7 @@ class UpdateController(QObject):
             updater.launch_installer(self._installer)
         except Exception as e:
             self._state = "idle"
+            self.app.installing_update = False
             log.exception("update: could not start setup")
             self._show("error", err=f"Couldn't start the setup program: {e}")
             return

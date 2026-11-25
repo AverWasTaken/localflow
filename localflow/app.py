@@ -159,6 +159,9 @@ class LocalFlowApp:
         self.settings_win = None
         self.history_win = None
         self.updates = None            # update_ui.UpdateController, made in run() (needs the tray)
+        self.installing_update = False  # set just before setup starts: no new dictation / meeting recording
+        self._meeting_starting = 0      # meeting starts in flight (update_blocker counts them as recordings)
+        self._meeting_start_lock = threading.Lock()
         self.tray: Optional[QSystemTrayIcon] = None
         self._status = "Starting..."
         self._ready = False
@@ -335,6 +338,13 @@ class LocalFlowApp:
         # pre-roll would hold the voice if it was audible just now
         skip_preroll = self.tts.recording_started(rid)
         self._fg_begin(rid)             # before anything else: background jobs yield the GPU from now on
+        # checked after _fg_begin (gate busy): the update sets the flag and then checks update_blocker(), so
+        # either it sees this dictation and waits, or this sees the flag and stops
+        if self.installing_update:      # LocalFlow is about to quit for an update
+            log.info("hotkey ignored: installing an update")
+            self.hotkey.force_idle()
+            self._fg_end(rid)
+            return
         if self._game_blocks():
             # no overlay: it could steal focus / flicker over a fullscreen game
             log.info("hotkey ignored: game mode")
@@ -799,6 +809,18 @@ class LocalFlowApp:
         """Start the meeting recorder (any thread; blocks while the audio streams open). Errors -> toast."""
         if self.transcripts is None:
             self.bridge.toast.emit("error", "Meeting recording unavailable - see log")
+            return False
+        with self._meeting_start_lock:  # counted before the flag check, like _do_start's gate (see there)
+            self._meeting_starting += 1
+        try:
+            return self._start_meeting()
+        finally:
+            with self._meeting_start_lock:
+                self._meeting_starting -= 1
+
+    def _start_meeting(self) -> bool:
+        if self.installing_update:
+            self.bridge.toast.emit("error", "LocalFlow is closing to install an update")
             return False
         try:
             st = self.transcripts.start_meeting()
@@ -1460,7 +1482,8 @@ class LocalFlowApp:
 
     def update_blocker(self) -> str:
         """What an update install must wait for ("" = nothing): quitting would cut it off."""
-        if self.meeting_recording:
+        starting = self._meeting_starting   # read first: it drops to 0 only after recording is already True
+        if starting or self.meeting_recording:
             return "the meeting recording"
         if self._recording or self.gate.busy():
             return "the current dictation"

@@ -82,10 +82,13 @@ class FakeCleaner:
 
 class FakeHotkey:
     def __init__(self, *a, **k):
-        pass
+        self.idled = 0
 
     def set_enabled(self, *a):
         pass
+
+    def force_idle(self):
+        self.idled += 1
 
 
 class FakeService:
@@ -214,6 +217,86 @@ class AppWiring(unittest.TestCase):
         self.app._do_start()
         self.assertEqual(self.app._ctx, ("cursor.exe", "main.py"))
         self.app._do_cancel("esc")
+
+
+class UpdateInstallGuard(unittest.TestCase):
+    """installing_update (set by update_ui just before setup starts) vs. a dictation / meeting starting."""
+    setUp = AppWiring.setUp
+    tearDown = AppWiring.tearDown
+
+    def test_flag_stops_new_dictation_and_frees_gate(self):
+        app_mod.winutil.foreground_info = lambda: ("notepad.exe", "x")
+        self.app.installing_update = True
+        self.app._do_start()
+        self.assertFalse(self.app._recording)
+        self.assertIsNone(self.app._session)
+        self.assertFalse(self.app.gate.busy())          # _fg_begin undone
+        self.assertEqual(self.app.hotkey.idled, 1)
+        self.assertEqual(self.app.update_blocker(), "")
+        self.app.installing_update = False              # setup failed to start: dictation works again
+        self.app._do_start()
+        self.assertTrue(self.app._recording)
+        self.assertEqual(self.app.update_blocker(), "the current dictation")
+        self.app._do_cancel("esc")
+
+    def test_dictation_counts_as_busy_before_the_flag_check(self):
+        # the update side sets the flag and then calls update_blocker(); a dictation that got past the flag
+        # check must already be visible there (gate busy from _fg_begin)
+        seen = []
+        real = self.app._game_blocks
+
+        def probe():
+            seen.append(self.app.update_blocker())
+            return real()
+        self.app._game_blocks = probe                   # runs right after the flag check
+        app_mod.winutil.foreground_info = lambda: ("notepad.exe", "x")
+        self.app._do_start()
+        self.assertEqual(seen, ["the current dictation"])
+        self.app._do_cancel("esc")
+
+    def test_meeting_start_in_flight_blocks_install_and_flag_blocks_meeting(self):
+        import threading
+        svc = self.app.transcripts
+        entered, release = threading.Event(), threading.Event()
+
+        def start():
+            entered.set()
+            release.wait(5)
+            svc.recorder.recording = True
+            return {"dir": "x"}
+        svc.start_meeting = start
+        t = threading.Thread(target=self.app.start_meeting)
+        t.start()
+        self.assertTrue(entered.wait(5))
+        self.assertEqual(self.app.update_blocker(), "the meeting recording")    # streams still opening
+        release.set()
+        t.join(5)
+        self.assertEqual(self.app._meeting_starting, 0)
+        self.assertEqual(self.app.update_blocker(), "the meeting recording")    # now recording
+        svc.recorder.recording = False
+        self.assertEqual(self.app.update_blocker(), "")
+        self.app.installing_update = True
+        svc.start_meeting = lambda: self.fail("meeting started while installing")
+        self.assertFalse(self.app.start_meeting())
+        self.assertEqual(self.app._meeting_starting, 0)
+
+    def test_blocker_sees_meeting_that_finishes_starting_mid_check(self):
+        # the meeting thread sets recording=True and then drops the counter between update_blocker()'s two reads
+        app = self.app
+
+        class Rec:
+            reads = 0
+
+            @property
+            def recording(self):
+                Rec.reads += 1
+                if Rec.reads == 1:                      # first read: streams still opening...
+                    app._meeting_starting = 0           # ...then the start finishes (counter after recording)
+                    return False
+                return True
+        self.app.transcripts.recorder = Rec()
+        self.app._meeting_starting = 1
+        self.assertEqual(self.app.update_blocker(), "the meeting recording")
 
 
 class TranscriptsWiring(unittest.TestCase):

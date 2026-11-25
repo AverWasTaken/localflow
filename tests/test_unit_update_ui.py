@@ -2,6 +2,7 @@
 starting setup are mocked; the app is a stand-in with just what the controller uses."""
 import os
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -129,6 +130,74 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertTrue(started[0].is_set())
         li.assert_not_called()
         self.app.quit.assert_not_called()
+
+    def test_cancel_after_download_finished_does_not_install(self):
+        self._check(True, INFO)
+        with mock.patch.object(updater, "can_self_update", return_value=True), \
+                mock.patch.object(updater, "launch_installer") as li:
+            self.ctl._state = "downloading"
+            self.ctl._cancel = threading.Event()
+            self.ctl.cancel()                       # user cancels...
+            self.ctl._on_downloaded("C:/t/s.exe", "")   # ...but the success signal was already queued
+        li.assert_not_called()
+        self.assertEqual(self.ctl._state, "idle")
+        self.app.quit.assert_not_called()
+
+    def test_installing_flag_set_before_setup_and_rechecked(self):
+        self.app.installing_update = False
+        seen = []
+        with mock.patch.object(updater, "launch_installer",
+                               side_effect=lambda p: seen.append(self.app.installing_update)):
+            self._check(True, INFO)
+            self.ctl._installer, self.ctl._state = "C:/t/s.exe", "waiting"
+            self.ctl._install_when_free()
+        self.assertEqual(seen, [True])          # new recordings blocked before setup starts
+        # a recording is running when the flag goes up: keep waiting, flag cleared
+        self.ctl._state = "waiting"
+        self.app.installing_update = False
+        self.blocker = "the current dictation"
+        with mock.patch.object(updater, "launch_installer") as li:
+            self.ctl._install_when_free()
+        li.assert_not_called()
+        self.assertFalse(self.app.installing_update)
+        self.assertEqual(self.ctl._state, "waiting")
+        self.ctl._wait_timer.stop()
+
+    def test_recording_starting_after_flag_keeps_waiting(self):
+        self._check(True, INFO)
+        flags, answers = [], iter(["", "the current dictation"])   # clear, then a dictation got in first
+
+        def blocker():
+            flags.append(self.app.installing_update)
+            return next(answers)
+        self.app.update_blocker = blocker
+        self.app.installing_update = False
+        self.ctl._installer, self.ctl._state = "C:/t/s.exe", "waiting"
+        with mock.patch.object(updater, "launch_installer") as li:
+            self.ctl._install_when_free()
+        self.assertEqual(flags, [False, True])          # flag only goes up after a clear first check
+        li.assert_not_called()
+        self.assertFalse(self.app.installing_update)
+        self.assertEqual(self.ctl._state, "waiting")
+        self.ctl._wait_timer.stop()
+
+    def test_deferred_offer_respects_skip_and_switch(self):
+        self.blocker = "the current dictation"
+        with mock.patch.object(update_ui.QTimer, "singleShot"):
+            self._check(False, INFO)
+        self.app.cfg.d["updates.skipped_version"] = "9.9.9"      # skipped from a manual check meanwhile
+        self.blocker = ""
+        self.ctl._offer_when_quiet()
+        self.assertIsNone(self.ctl.dialog)
+        self.assertIsNone(self.ctl._pending)
+        self.app.cfg.d["updates.skipped_version"] = ""
+        self.blocker = "x"
+        with mock.patch.object(update_ui.QTimer, "singleShot"):
+            self._check(False, INFO)
+        self.app.cfg.d["updates.check_on_launch"] = False
+        self.blocker = ""
+        self.ctl._offer_when_quiet()
+        self.assertIsNone(self.ctl.dialog)
 
     def test_offer_waits_while_busy(self):
         self.blocker = "the current dictation"
